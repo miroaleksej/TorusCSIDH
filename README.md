@@ -74,33 +74,6 @@ These criteria work together with a threshold of 85% for accepting a curve as se
   - macOS 10.15+
   - Windows 10+ (with WSL2 recommended)
 
-## Installation
-
-### Linux (Ubuntu/Debian)
-
-```bash
-# Install dependencies
-sudo apt-get update
-sudo apt-get install build-essential cmake pkg-config libssl-dev libsodium-dev libgmp-dev libboost-system-dev libboost-graph-dev libeigen3-dev
-
-# Install RELIC (required)
-git clone https://github.com/relic-toolkit/relic.git
-cd relic
-mkdir build
-cd build
-cmake -DCMAKE_BUILD_TYPE=Release -DWITH_MULTI=OFF -DWITH_CUDA=OFF -DALLOC=STACK -DLANG=C -DSHLIB=ON -DSTBIN=ON -DTIMER=HREAL -DCHECK=off -DVERBS=off -DDEBUG=off -DARITH=x64-asm-25519 -DCurve=ED25519 -DMEMORY=INT -DFP_PRIME=255 ..
-make
-sudo make install
-
-# Build TorusCSIDH
-cd /path/to/toruscsidh
-mkdir build
-cd build
-cmake ..
-make
-sudo make install
-```
-
 ## Usage Example
 
 ```cpp
