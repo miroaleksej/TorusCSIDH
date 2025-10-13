@@ -5,10 +5,8 @@
 ![C++](https://img.shields.io/badge/C++-17/20-00599C?style=for-the-badge&logo=c%2B%2B&logoColor=white)
 ![Development Status](https://img.shields.io/badge/Status-In_Development-orange?style=for-the-badge)
 
-[![Visitor Count](https://profile-counter.glitch.me/toruscsidh/count.svg)](https://profile-counter.glitch.me/toruscsidh)
-
 >## ⚠️ Development Status
-**This project is currently in active development and should not be used in production environments.** The current implementation represents a research prototype of the TorusCSIDH post-quantum cryptographic system. While the mathematical foundations are sound and the code has been designed with security in mind, **this implementation has not yet undergone comprehensive security audits or testing** required for production use. Production deployment should only occur after thorough independent verification and when an official stable release is published.
+>**This project is currently in active development and should not be used in production environments.** The current implementation represents a research prototype of the TorusCSIDH post-quantum cryptographic system. While the mathematical foundations are sound and the code has been designed with security in mind, **this implementation has not yet undergone comprehensive security audits or testing** required for production use. Production deployment should only occur after thorough independent verification and when an official stable release is published.
 
 The system is in the **verification and debugging stage** - no formal testing has been conducted yet. We welcome researchers, cryptographers, and developers to contribute to the project through code review, mathematical verification, and collaborative development.
 
