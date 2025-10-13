@@ -39,7 +39,7 @@ Before contributing, ensure you have the required dependencies installed:
    git clone https://github.com/your-username/toruscsidh.git
    cd toruscsidh
    ```
-3. Install dependencies (see [README](README.md) for detailed instructions)
+3. Install dependencies (see [README](https://github.com/miroaleksej/TorusCSIDH/tree/main) for detailed instructions)
 4. Build the project:
    ```bash
    mkdir build
