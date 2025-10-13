@@ -949,5 +949,3 @@ int main() {
 ## Copyright Notice
 
 Copyright (c) 2025 TorusCSIDH Development Team
-
-This document is licensed under the Creative Commons Attribution-ShareAlike 4.0 International License.
