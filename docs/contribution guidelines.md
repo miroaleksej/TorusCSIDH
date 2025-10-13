@@ -89,7 +89,7 @@ As a cryptographic project, we welcome mathematical verification:
 
 **IMPORTANT:** If you discover a security vulnerability, **DO NOT** open a public issue. Instead, follow our responsible disclosure process:
 
-1. Email security@toruscsidh.org with details of the vulnerability
+1. Email miro-aleksej@yandex.ru with details of the vulnerability
 2. Include:
    - Detailed description of the vulnerability
    - Steps to reproduce
