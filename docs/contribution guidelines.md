@@ -16,7 +16,7 @@ Thank you for your interest in contributing to TorusCSIDH! This document outline
 
 ## Code of Conduct
 
-All contributors are expected to follow our [Code of Conduct](CODE_OF_CONDUCT.md). Please review it before contributing to ensure a respectful and collaborative environment.
+All contributors are expected to follow our [Code of Conduct]([CODE_OF_CONDUCT.md](https://github.com/miroaleksej/TorusCSIDH/blob/main/docs/Code%20of%20Conduct.md)). Please review it before contributing to ensure a respectful and collaborative environment.
 
 ## Getting Started
 
