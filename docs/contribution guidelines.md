@@ -253,7 +253,7 @@ make test
 
 ## License
 
-By contributing to TorusCSIDH, you agree that your contributions will be licensed under the MIT License as found in the [LICENSE](LICENSE) file.
+By contributing to TorusCSIDH, you agree that your contributions will be licensed under the MIT License as found in the [LICENSE](https://github.com/miroaleksej/TorusCSIDH/blob/main/LICENSE) file.
 
 When adding new files, include the following license header:
 
