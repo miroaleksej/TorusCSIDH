@@ -40,7 +40,7 @@ This Code of Conduct also applies when an individual is officially representing 
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the project team at security@toruscsidh.org. All complaints will be reviewed and investigated promptly and fairly.
+Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the project team at miro-aleksej@yandex.ru. All complaints will be reviewed and investigated promptly and fairly.
 
 Project maintainers will take appropriate action in response to verified violations, which may include:
 - A private, written warning
