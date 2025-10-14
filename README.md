@@ -118,7 +118,7 @@ We welcome researchers, cryptographers, and developers to contribute to the proj
 - Implementation improvements
 - Testing and benchmarking
 
-Please see our [contribution guidelines](CONTRIBUTING.md) for details on how to participate in this important effort to secure Bitcoin against quantum threats.
+Please see our [contribution guidelines]([CONTRIBUTING.md](https://github.com/miroaleksej/TorusCSIDH/blob/main/docs/contribution%20guidelines.md) for details on how to participate in this important effort to secure Bitcoin against quantum threats.
 
 ## Contact
 
