@@ -3,8 +3,44 @@
 #include <ctime>
 #include <iomanip>
 #include <sstream>
+#include <filesystem>
 
-// Исправление 1: Проверка коммутативности в методе верификации
+// Глобальная функция для безопасной очистки памяти
+void secure_clean_memory(void* ptr, size_t size) {
+    if (ptr == nullptr || size == 0) return;
+    
+    volatile unsigned char* vptr = static_cast<volatile unsigned char*>(ptr);
+    for (size_t i = 0; i < size; i++) {
+        vptr[i] = static_cast<unsigned char>(randombytes_random() % 256);
+    }
+    
+    // Дополнительная очистка с использованием sodium
+    sodium_memzero(ptr, size);
+}
+
+// Безопасная реализация GMP операций с секретными данными
+GmpRaii secure_gmp_random(const GmpRaii& max) {
+    // Генерация случайного числа в безопасном диапазоне
+    size_t bits = mpz_sizeinbase(max.get_mpz_t(), 2);
+    std::vector<unsigned char> random_bytes((bits + 7) / 8);
+    
+    // Используем криптографически безопасный RNG
+    randombytes_buf(random_bytes.data(), random_bytes.size());
+    
+    // Создаем GMP число из случайных байтов
+    GmpRaii result;
+    mpz_import(result.get_mpz_t(), random_bytes.size(), 1, 1, 0, 0, random_bytes.data());
+    
+    // Обеспечиваем, что число в пределах диапазона
+    result %= max;
+    
+    // Дополнительная очистка временных данных
+    secure_clean_memory(random_bytes.data(), random_bytes.size());
+    
+    return result;
+}
+
+// ИСПРАВЛЕНИЕ: Проверка коммутативности в методе верификации
 bool TorusCSIDH::verify(const std::vector<unsigned char>& message,
                         const std::vector<unsigned char>& signature,
                         const MontgomeryCurve& public_curve) {
@@ -12,7 +48,7 @@ bool TorusCSIDH::verify(const std::vector<unsigned char>& message,
         throw std::runtime_error("System is not ready for operation");
     }
     
-    auto start = std::chrono::high_resolution_clock::now();
+    start_time = std::chrono::high_resolution_clock::now();
     
     // Проверка целостности системы перед выполнением
     if (!code_integrity.system_integrity_check()) {
@@ -214,37 +250,61 @@ MontgomeryCurve TorusCSIDH::compute_isogeny_degree_7(const MontgomeryCurve& curv
     return MontgomeryCurve(A_prime, p);
 }
 
-// ИСПРАВЛЕНИЕ: Безопасная очистка памяти для секретных данных
-void secure_clean_memory(void* ptr, size_t size) {
-    if (ptr == nullptr || size == 0) return;
-    
-    volatile unsigned char* vptr = static_cast<volatile unsigned char*>(ptr);
-    for (size_t i = 0; i < size; i++) {
-        vptr[i] = static_cast<unsigned char>(randombytes_random() % 256);
+// ИСПРАВЛЕНИЕ: Добавлена проверка "малости" ключа при генерации
+void TorusCSIDH::generate_key_pair() {
+    if (!relic_initialized) {
+        init_relic();
     }
     
-    // Дополнительная очистка с использованием sodium
-    sodium_memzero(ptr, size);
+    // Генерация случайного ключа с ограничением "малости"
+    private_key.resize(params.num_primes);
+    int weight = 0;
+    
+    // Определяем максимальный вес ключа в зависимости от уровня безопасности
+    int max_weight = (params.security_bits == 128) ? 256 : 384;
+    
+    // Гарантируем, что ключ будет "малым" (small)
+    while (weight == 0 || weight > max_weight) {
+        weight = 0;
+        for (size_t i = 0; i < private_key.size(); i++) {
+            // Генерация экспоненты в диапазоне [-max_key_magnitude, max_key_magnitude]
+            int exponent = generate_random_int(-params.max_key_magnitude, params.max_key_magnitude);
+            private_key[i] = exponent;
+            
+            if (exponent != 0) {
+                weight++;
+            }
+        }
+    }
+    
+    // Вычисление публичной кривой
+    public_curve = base_curve;
+    for (size_t i = 0; i < private_key.size(); i++) {
+        if (private_key[i] != 0) {
+            unsigned int prime_degree = static_cast<unsigned int>(params.primes[i].get_str().c_str());
+            EllipticCurvePoint kernel_point = public_curve.find_point_of_order(prime_degree, *rfc6979_rng);
+            if (!kernel_point.is_infinity()) {
+                public_curve = compute_isogeny(public_curve, kernel_point, prime_degree);
+            }
+        }
+    }
+    
+    // Проверка, что ключ действительно мал
+    if (!is_small_key(convert_to_gmp_key(private_key))) {
+        throw std::runtime_error("Generated key is not small, security compromised");
+    }
 }
 
-// ИСПРАВЛЕНИЕ: Безопасная реализация GMP операций с секретными данными
-GmpRaii secure_gmp_random(const GmpRaii& max) {
-    // Генерация случайного числа в безопасном диапазоне
-    size_t bits = mpz_sizeinbase(max.get_mpz_t(), 2);
-    std::vector<unsigned char> random_bytes((bits + 7) / 8);
-    
-    // Используем криптографически безопасный RNG
-    randombytes_buf(random_bytes.data(), random_bytes.size());
-    
-    // Создаем GMP число из случайных байтов
+// ИСПРАВЛЕНИЕ: Добавлена функция для преобразования ключа в GMP формат
+GmpRaii TorusCSIDH::convert_to_gmp_key(const std::vector<short>& key) const {
     GmpRaii result;
-    mpz_import(result.get_mpz_t(), random_bytes.size(), 1, 1, 0, 0, random_bytes.data());
+    mpz_set_ui(result.get_mpz_t(), 0);
     
-    // Обеспечиваем, что число в пределах диапазона
-    result %= max;
-    
-    // Дополнительная очистка временных данных
-    secure_clean_memory(random_bytes.data(), random_bytes.size());
+    for (size_t i = 0; i < key.size(); i++) {
+        if (key[i] != 0) {
+            mpz_setbit(result.get_mpz_t(), i);
+        }
+    }
     
     return result;
 }
@@ -415,7 +475,7 @@ std::vector<unsigned char> CodeIntegrityProtection::get_secure_backup_key_from_s
             std::vector<unsigned char> encrypted_key(size);
             key_file.read(reinterpret_cast<char*>(encrypted_key.data()), size);
             
-            // Расшифровка ключа с использованием мастер-пароля (который может быть получен от пользователя)
+            // Расшифровка ключа с использованием мастер-пароля
             if (decrypt_key_with_master_password(encrypted_key, key)) {
                 return key;
             }
@@ -428,6 +488,7 @@ std::vector<unsigned char> CodeIntegrityProtection::get_secure_backup_key_from_s
     // Сохраняем ключ в защищенном виде
     std::vector<unsigned char> encrypted_key;
     if (encrypt_key_with_master_password(key, encrypted_key)) {
+        std::filesystem::create_directories("secure_storage");
         std::ofstream key_file("secure_storage/backup_key.enc", std::ios::binary);
         if (key_file) {
             key_file.write(reinterpret_cast<char*>(encrypted_key.data()), encrypted_key.size());
@@ -623,61 +684,78 @@ void GeometricValidator::initialize_security_parameters(SecurityLevel level) {
     }
 }
 
-// ИСПРАВЛЕНИЕ: Добавлена проверка "малости" ключа при генерации
-void TorusCSIDH::generate_key_pair() {
-    if (!relic_initialized) {
-        init_relic();
-    }
+// НОВАЯ РЕАЛИЗАЦИЯ: Безопасный ввод мастер-пароля
+std::string CodeIntegrityProtection::get_master_password_from_user() const {
+    std::string password;
     
-    // Генерация случайного ключа с ограничением "малости"
-    private_key.resize(params.num_primes);
-    int weight = 0;
+    // В реальном приложении следует использовать secure_getpass() или аналоги
+    // Это пример, в продакшене нужна более безопасная реализация
+    std::cout << "Введите мастер-пароль для защиты системы (пароль не будет отображаться): ";
     
-    // Определяем максимальный вес ключа в зависимости от уровня безопасности
-    int max_weight = (params.security_bits == 128) ? 256 : 384;
-    
-    // Гарантируем, что ключ будет "малым" (small)
-    while (weight == 0 || weight > max_weight) {
-        weight = 0;
-        for (size_t i = 0; i < private_key.size(); i++) {
-            // Генерация экспоненты в диапазоне [-max_key_magnitude, max_key_magnitude]
-            int exponent = generate_random_int(-params.max_key_magnitude, params.max_key_magnitude);
-            private_key[i] = exponent;
-            
-            if (exponent != 0) {
-                weight++;
+    // Используем терминальный ввод без эха
+    #ifdef _WIN32
+        char ch;
+        while ((ch = _getch()) != '\r') {
+            if (ch == '\b') { // Backspace
+                if (!password.empty()) {
+                    password.pop_back();
+                    std::cout << "\b \b";
+                }
+            } else {
+                password.push_back(ch);
+                std::cout << '*';
             }
         }
-    }
+        std::cout << std::endl;
+    #else
+        struct termios oldt, newt;
+        tcgetattr(STDIN_FILENO, &oldt);
+        newt = oldt;
+        newt.c_lflag &= ~ECHO;
+        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+        
+        std::getline(std::cin, password);
+        
+        tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+        std::cout << std::endl;
+    #endif
     
-    // Вычисление публичной кривой
-    public_curve = base_curve;
-    for (size_t i = 0; i < private_key.size(); i++) {
-        if (private_key[i] != 0) {
-            unsigned int prime_degree = static_cast<unsigned int>(params.primes[i].get_str().c_str());
-            EllipticCurvePoint kernel_point = public_curve.find_point_of_order(prime_degree, *rfc6979_rng);
-            if (!kernel_point.is_infinity()) {
-                public_curve = compute_isogeny(public_curve, kernel_point, prime_degree);
-            }
-        }
-    }
-    
-    // Проверка, что ключ действительно мал
-    if (!is_small_key(convert_to_gmp_key(private_key))) {
-        throw std::runtime_error("Generated key is not small, security compromised");
-    }
+    return password;
 }
 
-// ИСПРАВЛЕНИЕ: Добавлена функция для преобразования ключа в GMP формат
-GmpRaii TorusCSIDH::convert_to_gmp_key(const std::vector<short>& key) const {
-    GmpRaii result;
-    mpz_set_ui(result.get_mpz_t(), 0);
+// НОВАЯ РЕАЛИЗАЦИЯ: Защита от атак через слабые ключи
+bool TorusCSIDH::is_weak_key() const {
+    // Проверка на наличие известных слабых ключей
+    // Основано на исследованиях последних атак на CSIDH
     
-    for (size_t i = 0; i < key.size(); i++) {
-        if (key[i] != 0) {
-            mpz_setbit(result.get_mpz_t(), i);
+    // Проверка на маленькие ключи (могут быть уязвимы к атакам)
+    int small_key_count = 0;
+    for (const auto& val : private_key) {
+        if (std::abs(val) < 3) {
+            small_key_count++;
         }
     }
     
-    return result;
+    // Если слишком много маленьких значений, ключ может быть уязвим
+    if (static_cast<double>(small_key_count) / private_key.size() > 0.7) {
+        return true;
+    }
+    
+    // Проверка на регулярные шаблоны
+    for (size_t i = 0; i < private_key.size() - 3; i++) {
+        if (private_key[i] == private_key[i+1] && 
+            private_key[i] == private_key[i+2] && 
+            private_key[i] == private_key[i+3]) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+// НОВАЯ РЕАЛИЗАЦИЯ: Проверка безопасности ключа
+bool TorusCSIDH::is_secure_key() const {
+    // Проверка, что ключ соответствует всем критериям безопасности
+    return is_small_key(convert_to_gmp_key(private_key)) && 
+           !is_weak_key();
 }
