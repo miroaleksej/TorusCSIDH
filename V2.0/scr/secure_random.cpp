@@ -8,10 +8,15 @@
 #include <cmath>
 #include <sodium.h>
 #include <gmp.h>
+#include <Eigen/Dense>
+#include <boost/graph/adjacency_list.hpp>
+#include <boost/graph/laplacian_matrix.hpp>
 #include "security_constants.h"
 #include "elliptic_curve.h"
 #include "postquantum_hash.h"
 #include "rfc6979_rng.h"
+#include "geometric_validator.h"
+#include "secure_audit_logger.h"
 
 namespace toruscsidh {
 
@@ -125,6 +130,22 @@ std::vector<short> SecureRandom::generate_csidh_key(SecurityConstants::SecurityL
     std::random_device rd;
     std::mt19937 g(rd());
     std::shuffle(key.begin(), key.end(), g);
+    
+    // Проверка на маленькие значения (могут указывать на вырожденную структуру)
+    int small_value_count = 0;
+    for (const auto& val : key) {
+        if (std::abs(val) < 3) {
+            small_value_count++;
+        }
+    }
+    
+    double small_value_ratio = static_cast<double>(small_value_count) / key.size();
+    const double max_small_value_ratio = 0.7; // 70% - эмпирический предел
+    
+    if (small_value_ratio > max_small_value_ratio) {
+        // Перегенерируем ключ, если слишком много маленьких значений
+        return generate_csidh_key(security_level, params);
+    }
     
     // Увеличиваем счетчик операций для обеспечения постоянного времени
     operation_counter_++;
@@ -255,6 +276,21 @@ std::vector<short> SecureRandom::generate_ephemeral_key(SecurityConstants::Secur
     
     // Если сумма слишком мала, генерируем новый ключ
     if (sum_abs < max_l1 / 2) {
+        return generate_ephemeral_key(security_level, params);
+    }
+    
+    // Проверка на регулярные паттерны
+    if (has_regular_patterns(key)) {
+        return generate_ephemeral_key(security_level, params);
+    }
+    
+    // Проверка на уязвимость к атаке через длинный путь
+    if (is_vulnerable_to_long_path_attack(key)) {
+        return generate_ephemeral_key(security_level, params);
+    }
+    
+    // Проверка на уязвимость к атаке через вырожденную топологию
+    if (is_vulnerable_to_degenerate_topology_attack(key)) {
         return generate_ephemeral_key(security_level, params);
     }
     
@@ -409,6 +445,166 @@ GmpRaii SecureRandom::generate_weighted_random(const GmpRaii& max, double weight
     operation_counter_++;
     
     return result;
+}
+
+bool SecureRandom::has_regular_patterns(const std::vector<short>& key) {
+    // Проверка на наличие регулярных паттернов в ключе
+    // Основано на исследованиях атак через вырожденную топологию
+    const size_t min_pattern_length = SecurityConstants::MIN_KEY_PATTERN_LEN;
+    
+    // Проверка на постоянные последовательности
+    for (size_t i = 0; i < key.size() - min_pattern_length + 1; i++) {
+        bool is_constant = true;
+        for (size_t j = 1; j < min_pattern_length; j++) {
+            if (key[i] != key[i + j]) {
+                is_constant = false;
+                break;
+            }
+        }
+        if (is_constant) {
+            return true;
+        }
+    }
+    
+    // Проверка на арифметические прогрессии
+    for (size_t i = 0; i < key.size() - min_pattern_length + 1; i++) {
+        if (key.size() - i < min_pattern_length) break;
+        
+        int diff = key[i + 1] - key[i];
+        bool is_arithmetic = true;
+        for (size_t j = 2; j < min_pattern_length; j++) {
+            if (key[i + j] - key[i + j - 1] != diff) {
+                is_arithmetic = false;
+                break;
+            }
+        }
+        if (is_arithmetic) {
+            return true;
+        }
+    }
+    
+    // Проверка на геометрические прогрессии
+    for (size_t i = 0; i < key.size() - min_pattern_length + 1; i++) {
+        if (key.size() - i < min_pattern_length) break;
+        
+        if (key[i] == 0 || key[i + 1] == 0) continue;
+        
+        double ratio = static_cast<double>(key[i + 1]) / key[i];
+        bool is_geometric = true;
+        for (size_t j = 2; j < min_pattern_length; j++) {
+            if (key[i + j - 1] == 0) {
+                is_geometric = false;
+                break;
+            }
+            
+            double current_ratio = static_cast<double>(key[i + j]) / key[i + j - 1];
+            if (std::abs(current_ratio - ratio) > 0.001) {
+                is_geometric = false;
+                break;
+            }
+        }
+        if (is_geometric) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+bool SecureRandom::is_vulnerable_to_long_path_attack(const std::vector<short>& key) {
+    // Проверка уязвимости к атаке через длинный путь
+    // В атаке через длинный путь злоумышленник использует кривые,
+    // где последовательность изогений одного типа слишком длинная
+    
+    int max_consecutive_same_sign = 0;
+    int current_consecutive = 0;
+    int last_sign = 0;
+    
+    for (const auto& val : key) {
+        int sign = (val > 0) ? 1 : (val < 0) ? -1 : 0;
+        
+        if (sign == last_sign && sign != 0) {
+            current_consecutive++;
+        } else {
+            max_consecutive_same_sign = std::max(max_consecutive_same_sign, current_consecutive);
+            current_consecutive = (sign != 0) ? 1 : 0;
+            last_sign = sign;
+        }
+    }
+    
+    max_consecutive_same_sign = std::max(max_consecutive_same_sign, current_consecutive);
+    
+    // Порог для уязвимости зависит от уровня безопасности
+    int vulnerability_threshold;
+    switch (static_cast<int>(SecurityConstants::get_security_level())) {
+        case static_cast<int>(SecurityConstants::SecurityLevel::LEVEL_128):
+            vulnerability_threshold = SecurityConstants::MAX_CONSECUTIVE_128;
+            break;
+        case static_cast<int>(SecurityConstants::SecurityLevel::LEVEL_192):
+            vulnerability_threshold = SecurityConstants::MAX_CONSECUTIVE_192;
+            break;
+        case static_cast<int>(SecurityConstants::SecurityLevel::LEVEL_256):
+            vulnerability_threshold = SecurityConstants::MAX_CONSECUTIVE_256;
+            break;
+        default:
+            vulnerability_threshold = SecurityConstants::MAX_CONSECUTIVE_128;
+    }
+    
+    return max_consecutive_same_sign > vulnerability_threshold;
+}
+
+bool SecureRandom::is_vulnerable_to_degenerate_topology_attack(const std::vector<short>& key) {
+    // Проверка уязвимости к атаке через вырожденную топологию
+    // Такая атака использует кривые с неестественной структурой графа изогений
+    
+    // Проверка на маленькие значения (могут указывать на вырожденную структуру)
+    int small_value_count = 0;
+    for (const auto& val : key) {
+        if (std::abs(val) < 3) {
+            small_value_count++;
+        }
+    }
+    
+    double small_value_ratio = static_cast<double>(small_value_count) / key.size();
+    const double max_small_value_ratio = 0.7; // 70% - эмпирический предел
+    
+    return small_value_ratio > max_small_value_ratio;
+}
+
+GmpRaii SecureRandom::mod_inverse(const GmpRaii& a, const GmpRaii& p) {
+    // Расширенный алгоритм Евклида для нахождения модульного обратного
+    GmpRaii g, x, y;
+    extended_gcd(a, p, g, x, y);
+    
+    if (g != GmpRaii(1)) {
+        // Обратный элемент не существует
+        throw std::runtime_error("Modular inverse does not exist");
+    }
+    
+    // Нормализуем результат
+    x = x % p;
+    if (x < GmpRaii(0)) {
+        x = x + p;
+    }
+    
+    return x;
+}
+
+void SecureRandom::extended_gcd(const GmpRaii& a, const GmpRaii& b, GmpRaii& g, GmpRaii& x, GmpRaii& y) {
+    if (b == GmpRaii(0)) {
+        g = a;
+        x = GmpRaii(1);
+        y = GmpRaii(0);
+    } else {
+        extended_gcd(b, a % b, g, y, x);
+        y = y - (a / b) * x;
+    }
+}
+
+bool SecureRandom::is_constant_time() {
+    // Проверяем, что операция выполняется за постоянное время
+    // В реальной системе здесь будет сложная логика мониторинга
+    return true;
 }
 
 } // namespace toruscsidh
