@@ -9,6 +9,10 @@
 #include "secure_random.h"
 #include "security_constants.h"
 #include "secure_audit_logger.h"
+#include "geometric_validator.h"
+#include "postquantum_hash.h"
+#include "bech32m.h"
+#include "rfc6979_rng.h"
 
 namespace toruscsidh {
 
@@ -640,6 +644,277 @@ GmpRaii TorusCSIDH::convert_to_gmp_key() const {
 bool TorusCSIDH::is_equivalent_to_base_curve(const MontgomeryCurve& curve) const {
     // Две кривые Монтгомери эквивалентны, если их j-инварианты совпадают
     return curve.compute_j_invariant() == base_curve.compute_j_invariant();
+}
+
+// Дополнительные методы для усиления безопасности
+
+bool TorusCSIDH::is_key_well_distributed() const {
+    // Проверка равномерности распределения ключа
+    // В легитимном ключе коэффициенты должны быть распределены относительно равномерно
+    
+    // Подсчитываем количество положительных, отрицательных и нулевых коэффициентов
+    int positive_count = 0;
+    int negative_count = 0;
+    int zero_count = 0;
+    
+    for (const auto& val : private_key) {
+        if (val > 0) positive_count++;
+        else if (val < 0) negative_count++;
+        else zero_count++;
+    }
+    
+    // Вычисляем энтропию распределения знаков
+    double total = private_key.size();
+    double entropy = 0.0;
+    
+    if (positive_count > 0) {
+        double p = positive_count / total;
+        entropy -= p * std::log2(p);
+    }
+    
+    if (negative_count > 0) {
+        double p = negative_count / total;
+        entropy -= p * std::log2(p);
+    }
+    
+    if (zero_count > 0) {
+        double p = zero_count / total;
+        entropy -= p * std::log2(p);
+    }
+    
+    // Минимальная энтропия для легитимного ключа
+    const double min_entropy = 1.5;
+    
+    return entropy >= min_entropy;
+}
+
+bool TorusCSIDH::is_key_resistant_to_topological_analysis() const {
+    // Проверка устойчивости к топологическому анализу
+    // В легитимном ключе не должно быть явных паттернов в последовательности изогений
+    
+    // Проверка на периодичность
+    const size_t max_period = private_key.size() / 2;
+    for (size_t period = 1; period <= max_period; period++) {
+        bool is_periodic = true;
+        for (size_t i = 0; i < private_key.size() - period; i++) {
+            if (private_key[i] != private_key[i + period]) {
+                is_periodic = false;
+                break;
+            }
+        }
+        
+        if (is_periodic) {
+            return false; // Ключ уязвим к топологическому анализу
+        }
+    }
+    
+    // Проверка на корреляцию между соседними коэффициентами
+    double correlation = 0.0;
+    for (size_t i = 0; i < private_key.size() - 1; i++) {
+        correlation += private_key[i] * private_key[i + 1];
+    }
+    
+    // Нормализация корреляции
+    correlation = std::abs(correlation) / private_key.size();
+    
+    // Максимально допустимая корреляция
+    const double max_correlation = 5.0;
+    
+    return correlation <= max_correlation;
+}
+
+bool TorusCSIDH::has_sufficient_key_entropy() const {
+    // Проверка энтропии ключа
+    // В легитимном ключе должно быть достаточно высокое значение энтропии
+    
+    // Подсчитываем частоту встречаемости различных значений
+    std::map<short, int> value_count;
+    for (const auto& val : private_key) {
+        value_count[val]++;
+    }
+    
+    // Вычисляем энтропию
+    double total = private_key.size();
+    double entropy = 0.0;
+    
+    for (const auto& entry : value_count) {
+        double p = entry.second / total;
+        entropy -= p * std::log2(p);
+    }
+    
+    // Минимальная энтропия для легитимного ключа
+    const double min_entropy = 3.5;
+    
+    return entropy >= min_entropy;
+}
+
+bool TorusCSIDH::is_key_geometrically_sound() const {
+    // Проверка, что ключ соответствует геометрическим свойствам графа изогений
+    
+    // Создаем кривую из ключа
+    MontgomeryCurve test_curve = base_curve;
+    for (size_t i = 0; i < params.primes.size(); i++) {
+        int exponent = private_key[i];
+        
+        if (exponent != 0) {
+            unsigned int order = static_cast<unsigned int>(mpz_get_ui(params.primes[i].get_mpz_t()));
+            EllipticCurvePoint kernel_point = test_curve.find_point_of_order(order);
+            
+            // Применение изогении |exponent| раз
+            for (int j = 0; j < std::abs(exponent); j++) {
+                test_curve = test_curve.compute_isogeny(kernel_point, order);
+                
+                // Для отрицательных экспонент используем обратную изогению
+                if (exponent < 0) {
+                    kernel_point = kernel_point.scalar_multiply(GmpRaii(order - 1), test_curve);
+                }
+            }
+        }
+    }
+    
+    // Проверяем геометрические свойства полученной кривой
+    return validate_geometric_properties(test_curve);
+}
+
+bool TorusCSIDH::is_key_resistant_to_entropy_attack() const {
+    // Проверка устойчивости к атаке через низкую энтропию
+    
+    // Проверка на маленькие значения (могут указывать на вырожденную структуру)
+    int small_value_count = 0;
+    for (const auto& val : private_key) {
+        if (std::abs(val) < 3) {
+            small_value_count++;
+        }
+    }
+    
+    double small_value_ratio = static_cast<double>(small_value_count) / private_key.size();
+    const double max_small_value_ratio = 0.7; // 70% - эмпирический предел
+    
+    return small_value_ratio <= max_small_value_ratio;
+}
+
+bool TorusCSIDH::is_key_resistant_to_long_path_attack() const {
+    // Проверка уязвимости к атаке через длинный путь
+    // В атаке через длинный путь злоумышленник использует кривые,
+    // где последовательность изогений одного типа слишком длинная
+    
+    int max_consecutive_same_sign = 0;
+    int current_consecutive = 0;
+    int last_sign = 0;
+    
+    for (const auto& val : private_key) {
+        int sign = (val > 0) ? 1 : (val < 0) ? -1 : 0;
+        
+        if (sign == last_sign && sign != 0) {
+            current_consecutive++;
+        } else {
+            max_consecutive_same_sign = std::max(max_consecutive_same_sign, current_consecutive);
+            current_consecutive = (sign != 0) ? 1 : 0;
+            last_sign = sign;
+        }
+    }
+    
+    max_consecutive_same_sign = std::max(max_consecutive_same_sign, current_consecutive);
+    
+    // Порог для уязвимости зависит от уровня безопасности
+    int vulnerability_threshold;
+    switch (security_level_) {
+        case SecurityConstants::SecurityLevel::LEVEL_128:
+            vulnerability_threshold = SecurityConstants::MAX_CONSECUTIVE_128;
+            break;
+        case SecurityConstants::SecurityLevel::LEVEL_192:
+            vulnerability_threshold = SecurityConstants::MAX_CONSECUTIVE_192;
+            break;
+        case SecurityConstants::SecurityLevel::LEVEL_256:
+            vulnerability_threshold = SecurityConstants::MAX_CONSECUTIVE_256;
+            break;
+        default:
+            vulnerability_threshold = SecurityConstants::MAX_CONSECUTIVE_128;
+    }
+    
+    return max_consecutive_same_sign <= vulnerability_threshold;
+}
+
+bool TorusCSIDH::is_key_resistant_to_degenerate_topology_attack() const {
+    // Проверка уязвимости к атаке через вырожденную топологию
+    // Такая атака использует кривые с неестественной структурой графа изогений
+    
+    // Проверка на маленькие значения (могут указывать на вырожденную структуру)
+    int small_value_count = 0;
+    for (const auto& val : private_key) {
+        if (std::abs(val) < 3) {
+            small_value_count++;
+        }
+    }
+    
+    double small_value_ratio = static_cast<double>(small_value_count) / private_key.size();
+    const double max_small_value_ratio = 0.7; // 70% - эмпирический предел
+    
+    return small_value_ratio <= max_small_value_ratio;
+}
+
+bool TorusCSIDH::is_key_resistant_to_regular_pattern_attack() const {
+    // Проверка на наличие регулярных паттернов в ключе
+    // Основано на исследованиях атак через вырожденную топологию
+    const size_t min_pattern_length = SecurityConstants::MIN_KEY_PATTERN_LEN;
+    
+    // Проверка на постоянные последовательности
+    for (size_t i = 0; i < private_key.size() - min_pattern_length + 1; i++) {
+        bool is_constant = true;
+        for (size_t j = 1; j < min_pattern_length; j++) {
+            if (private_key[i] != private_key[i + j]) {
+                is_constant = false;
+                break;
+            }
+        }
+        if (is_constant) {
+            return false;
+        }
+    }
+    
+    // Проверка на арифметические прогрессии
+    for (size_t i = 0; i < private_key.size() - min_pattern_length + 1; i++) {
+        if (private_key.size() - i < min_pattern_length) break;
+        
+        int diff = private_key[i + 1] - private_key[i];
+        bool is_arithmetic = true;
+        for (size_t j = 2; j < min_pattern_length; j++) {
+            if (private_key[i + j] - private_key[i + j - 1] != diff) {
+                is_arithmetic = false;
+                break;
+            }
+        }
+        if (is_arithmetic) {
+            return false;
+        }
+    }
+    
+    // Проверка на геометрические прогрессии
+    for (size_t i = 0; i < private_key.size() - min_pattern_length + 1; i++) {
+        if (private_key.size() - i < min_pattern_length) break;
+        
+        if (private_key[i] == 0 || private_key[i + 1] == 0) continue;
+        
+        double ratio = static_cast<double>(private_key[i + 1]) / private_key[i];
+        bool is_geometric = true;
+        for (size_t j = 2; j < min_pattern_length; j++) {
+            if (private_key[i + j - 1] == 0) {
+                is_geometric = false;
+                break;
+            }
+            
+            double current_ratio = static_cast<double>(private_key[i + j]) / private_key[i + j - 1];
+            if (std::abs(current_ratio - ratio) > 0.001) {
+                is_geometric = false;
+                break;
+            }
+        }
+        if (is_geometric) {
+            return false;
+        }
+    }
+    
+    return true;
 }
 
 } // namespace toruscsidh
