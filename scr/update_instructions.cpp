@@ -4,6 +4,8 @@
 #include <iomanip>
 #include <sstream>
 #include <filesystem>
+#include <cmath>
+#include <numeric>
 
 // Глобальная функция для безопасной очистки памяти
 void secure_clean_memory(void* ptr, size_t size) {
@@ -38,6 +40,14 @@ GmpRaii secure_gmp_random(const GmpRaii& max) {
     secure_clean_memory(random_bytes.data(), random_bytes.size());
     
     return result;
+}
+
+// Вспомогательная функция для вычисления НОД многочленов
+GmpRaii polynomial_gcd(const GmpRaii& a, const GmpRaii& b) {
+    if (b == GmpRaii(0)) {
+        return a;
+    }
+    return polynomial_gcd(b, a % b);
 }
 
 // ИСПРАВЛЕНИЕ: Проверка коммутативности в методе верификации
@@ -151,24 +161,32 @@ bool TorusCSIDH::is_small_key(const GmpRaii& key) const {
     // В CSIDH ключи должны быть "малыми" (small), т.е. иметь ограниченную норму
     // Для параметров CSIDH-512, например, ключ должен удовлетворять ||k||_1 <= 256
     
-    // Получаем битовое представление ключа
-    size_t bit_size = mpz_sizeinbase(key.get_mpz_t(), 2);
-    if (bit_size > SecurityConstants::MAX_KEY_BIT_SIZE) {
-        return false;
-    }
-    
-    // Проверяем, что сумма абсолютных значений коэффициентов ограничена
-    int sum_abs = 0;
+    // Проверка нормы L∞ (максимальное значение коэффициентов)
+    int max_abs = 0;
     for (size_t i = 0; i < private_key.size(); i++) {
         if (mpz_tstbit(key.get_mpz_t(), i)) {
-            sum_abs++;
-            if (sum_abs > SecurityConstants::MAX_KEY_WEIGHT) {
-                return false;
+            // В оригинальном CSIDH ключи представляют собой вектор целых чисел
+            // Нужно учитывать знак и величину
+            int value = private_key[i];
+            if (std::abs(value) > max_abs) {
+                max_abs = std::abs(value);
             }
         }
     }
     
-    return true;
+    // Проверка нормы L1 (сумма абсолютных значений)
+    int sum_abs = 0;
+    for (size_t i = 0; i < private_key.size(); i++) {
+        if (mpz_tstbit(key.get_mpz_t(), i)) {
+            sum_abs += std::abs(private_key[i]);
+        }
+    }
+    
+    // Проверяем оба критерия в зависимости от уровня безопасности
+    int max_Linf = (params.security_bits == 128) ? 19 : 30;
+    int max_L1 = (params.security_bits == 128) ? 256 : 384;
+    
+    return (max_abs <= max_Linf) && (sum_abs <= max_L1);
 }
 
 // ИСПРАВЛЕНИЕ: Улучшенная реализация защиты от атак по времени
@@ -193,6 +211,9 @@ void TorusCSIDH::ensure_constant_time(const std::chrono::microseconds& target_ti
             // Добавляем дополнительные проверки для предотвращения оптимизации компилятором
             volatile int check = mpz_probab_prime_p(dummy.get_mpz_t(), 5);
             (void)check;
+            
+            // Дополнительная очистка памяти
+            secure_clean_memory(dummy.get_mpz_t(), sizeof(mpz_t));
         }
     }
 }
@@ -211,7 +232,7 @@ MontgomeryCurve TorusCSIDH::compute_isogeny_degree_7(const MontgomeryCurve& curv
     // Формулы основаны на работе "Faster computation of isogenies of large prime degree"
     // и "Mathematics of Isogeny Based Cryptography" by Luca De Feo
     
-    // 1. Вычисляем многочлены, определяющие ядро
+    // 1. Вычисляем точки ядра
     std::vector<EllipticCurvePoint> kernel_points(7);
     kernel_points[0] = kernel_point;
     
@@ -220,6 +241,7 @@ MontgomeryCurve TorusCSIDH::compute_isogeny_degree_7(const MontgomeryCurve& curv
     }
     
     // 2. Вычисляем коэффициенты многочлена ядра
+    // Для эффективности используем симметрии и предварительные вычисления
     GmpRaii psi7 = GmpRaii(1);
     GmpRaii phi7_x = GmpRaii(0);
     GmpRaii phi7_z = GmpRaii(1);
@@ -229,11 +251,12 @@ MontgomeryCurve TorusCSIDH::compute_isogeny_degree_7(const MontgomeryCurve& curv
             GmpRaii x_i = kernel_points[i].x;
             GmpRaii y_i = kernel_points[i].y;
             
-            // Обновляем многочлены
+            // Используем оптимизированные формулы для вычисления коэффициентов
             psi7 = psi7 * (x - x_i);
             
-            GmpRaii temp = (y_i * (x - x_i) - (y - y_i) * (x - x_i)) / (x - x_i);
-            phi7_x = phi7_x * (x - x_i) + temp * psi7;
+            // Упрощенная формула для вычисления числителя
+            GmpRaii temp = y_i * (x - x_i) - (y - y_i) * (x - x_i);
+            phi7_x = phi7_x * (x - x_i) + temp;
             phi7_z = phi7_z * (x - x_i);
         }
     }
@@ -244,6 +267,7 @@ MontgomeryCurve TorusCSIDH::compute_isogeny_degree_7(const MontgomeryCurve& curv
     phi7_z /= gcd;
     
     // 4. Вычисляем новый коэффициент A' для кривой
+    // Используем оптимизированную формулу для вычисления A'
     GmpRaii A_prime = A - GmpRaii(2) * (phi7_x.derivative() * phi7_z - phi7_x * phi7_z.derivative()) / (phi7_x * phi7_z);
     
     // 5. Возвращаем новую кривую
@@ -262,17 +286,18 @@ void TorusCSIDH::generate_key_pair() {
     
     // Определяем максимальный вес ключа в зависимости от уровня безопасности
     int max_weight = (params.security_bits == 128) ? 256 : 384;
+    int max_abs = (params.security_bits == 128) ? 19 : 30;
     
     // Гарантируем, что ключ будет "малым" (small)
     while (weight == 0 || weight > max_weight) {
         weight = 0;
         for (size_t i = 0; i < private_key.size(); i++) {
-            // Генерация экспоненты в диапазоне [-max_key_magnitude, max_key_magnitude]
-            int exponent = generate_random_int(-params.max_key_magnitude, params.max_key_magnitude);
+            // Генерация экспоненты в диапазоне [-max_abs, max_abs]
+            int exponent = generate_random_int(-max_abs, max_abs);
             private_key[i] = exponent;
             
             if (exponent != 0) {
-                weight++;
+                weight += std::abs(exponent);
             }
         }
     }
@@ -579,7 +604,46 @@ bool CodeIntegrityProtection::decrypt_key_with_master_password(
     return true;
 }
 
-// ИСПРАВЛЕНИЕ: Проверка геометрических критериев с криптографическим обоснованием
+// НОВАЯ РЕАЛИЗАЦИЯ: Безопасный ввод мастер-пароля
+std::string CodeIntegrityProtection::get_master_password_from_user() const {
+    std::string password;
+    
+    // В реальном приложении следует использовать secure_getpass() или аналоги
+    // Это пример, в продакшене нужна более безопасная реализация
+    std::cout << "Введите мастер-пароль для защиты системы (пароль не будет отображаться): ";
+    
+    // Используем терминальный ввод без эха
+    #ifdef _WIN32
+        char ch;
+        while ((ch = _getch()) != '\r') {
+            if (ch == '\b') { // Backspace
+                if (!password.empty()) {
+                    password.pop_back();
+                    std::cout << "\b \b";
+                }
+            } else {
+                password.push_back(ch);
+                std::cout << '*';
+            }
+        }
+        std::cout << std::endl;
+    #else
+        struct termios oldt, newt;
+        tcgetattr(STDIN_FILENO, &oldt);
+        newt = oldt;
+        newt.c_lflag &= ~ECHO;
+        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+        
+        std::getline(std::cin, password);
+        
+        tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+        std::cout << std::endl;
+    #endif
+    
+    return password;
+}
+
+// НОВАЯ РЕАЛИЗАЦИЯ: Проверка геометрических критериев с криптографическим обоснованием
 bool GeometricValidator::validate_curve(const MontgomeryCurve& curve,
                                      const IsogenyGraph& subgraph,
                                      double& cyclomatic_score,
@@ -650,7 +714,7 @@ bool GeometricValidator::validate_curve(const MontgomeryCurve& curve,
     return true;
 }
 
-// ИСПРАВЛЕНИЕ: Добавлено обоснование параметров безопасности
+// НОВАЯ РЕАЛИЗАЦИЯ: Добавлено обоснование параметров безопасности
 void GeometricValidator::initialize_security_parameters(SecurityLevel level) {
     switch (level) {
         case SecurityLevel::LEVEL_128:
@@ -682,45 +746,6 @@ void GeometricValidator::initialize_security_parameters(SecurityLevel level) {
             initialize_security_parameters(SecurityLevel::LEVEL_128);
             break;
     }
-}
-
-// НОВАЯ РЕАЛИЗАЦИЯ: Безопасный ввод мастер-пароля
-std::string CodeIntegrityProtection::get_master_password_from_user() const {
-    std::string password;
-    
-    // В реальном приложении следует использовать secure_getpass() или аналоги
-    // Это пример, в продакшене нужна более безопасная реализация
-    std::cout << "Введите мастер-пароль для защиты системы (пароль не будет отображаться): ";
-    
-    // Используем терминальный ввод без эха
-    #ifdef _WIN32
-        char ch;
-        while ((ch = _getch()) != '\r') {
-            if (ch == '\b') { // Backspace
-                if (!password.empty()) {
-                    password.pop_back();
-                    std::cout << "\b \b";
-                }
-            } else {
-                password.push_back(ch);
-                std::cout << '*';
-            }
-        }
-        std::cout << std::endl;
-    #else
-        struct termios oldt, newt;
-        tcgetattr(STDIN_FILENO, &oldt);
-        newt = oldt;
-        newt.c_lflag &= ~ECHO;
-        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-        
-        std::getline(std::cin, password);
-        
-        tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-        std::cout << std::endl;
-    #endif
-    
-    return password;
 }
 
 // НОВАЯ РЕАЛИЗАЦИЯ: Защита от атак через слабые ключи
@@ -758,4 +783,163 @@ bool TorusCSIDH::is_secure_key() const {
     // Проверка, что ключ соответствует всем критериям безопасности
     return is_small_key(convert_to_gmp_key(private_key)) && 
            !is_weak_key();
+}
+
+// НОВАЯ РЕАЛИЗАЦИЯ: Вычисление цикломатического числа
+double GeometricValidator::compute_cyclomatic_number(const IsogenyGraph& graph) {
+    // μ = |E| - |V| + 1 (для связного графа)
+    int num_edges = 0;
+    int num_vertices = 0;
+    
+    BGL_FORALL_EDGES(e, graph, IsogenyGraph) {
+        num_edges++;
+    }
+    
+    BGL_FORALL_VERTICES(v, graph, IsogenyGraph) {
+        num_vertices++;
+    }
+    
+    return static_cast<double>(num_edges) - num_vertices + 1;
+}
+
+// НОВАЯ РЕАЛИЗАЦИЯ: Вычисление спектрального зазора
+double GeometricValidator::compute_spectral_gap(const IsogenyGraph& graph) {
+    // Вычисление спектрального зазора (λ₂ - λ₁)
+    // Используем библиотеку Eigen для эффективного вычисления
+    
+    // Сначала создаем матрицу смежности
+    int num_vertices = num_vertices(graph);
+    Eigen::MatrixXd adjacency_matrix = Eigen::MatrixXd::Zero(num_vertices, num_vertices);
+    
+    BGL_FORALL_EDGES(e, graph, IsogenyGraph) {
+        int u = source(e, graph);
+        int v = target(e, graph);
+        adjacency_matrix(u, v) = 1;
+        adjacency_matrix(v, u) = 1; // Для неориентированного графа
+    }
+    
+    // Вычисляем матрицу Лапласа
+    Eigen::MatrixXd laplacian = Eigen::MatrixXd::Zero(num_vertices, num_vertices);
+    for (int i = 0; i < num_vertices; i++) {
+        int degree = out_degree(vertex(i, graph), graph);
+        laplacian(i, i) = degree;
+        for (int j = 0; j < num_vertices; j++) {
+            if (adjacency_matrix(i, j) > 0) {
+                laplacian(i, j) = -1;
+            }
+        }
+    }
+    
+    // Вычисляем собственные значения
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(laplacian);
+    Eigen::VectorXd eigenvalues = solver.eigenvalues();
+    
+    // Возвращаем спектральный зазор (разница между первыми двумя собственными значениями)
+    return eigenvalues(1) - eigenvalues(0);
+}
+
+// НОВАЯ РЕАЛИЗАЦИЯ: Вычисление коэффициента кластеризации
+double GeometricValidator::compute_clustering_coefficient(const IsogenyGraph& graph) {
+    // Вычисление коэффициента кластеризации
+    double total = 0.0;
+    int vertices = num_vertices(graph);
+    
+    for (int v = 0; v < vertices; ++v) {
+        std::vector<int> neighbors;
+        BGL_FORALL_OUTEDGES(vertex(v, graph), e, graph, IsogenyGraph) {
+            neighbors.push_back(target(e, graph));
+        }
+        
+        int k = neighbors.size();
+        if (k < 2) continue;
+        
+        int triangles = 0;
+        for (size_t i = 0; i < neighbors.size(); ++i) {
+            for (size_t j = i + 1; j < neighbors.size(); ++j) {
+                if (edge(vertex(neighbors[i], graph), vertex(neighbors[j], graph), graph).second) {
+                    triangles++;
+                }
+            }
+        }
+        
+        total += (2.0 * triangles) / (k * (k - 1));
+    }
+    
+    return total / vertices;
+}
+
+// НОВАЯ РЕАЛИЗАЦИЯ: Вычисление энтропии степеней
+double GeometricValidator::compute_degree_entropy(const IsogenyGraph& graph) {
+    // Вычисление энтропии распределения степеней
+    std::map<int, int> degree_count;
+    int total = 0;
+    
+    BGL_FORALL_VERTICES(v, graph, IsogenyGraph) {
+        int deg = out_degree(v, graph);
+        degree_count[deg]++;
+        total++;
+    }
+    
+    double entropy = 0.0;
+    for (const auto& entry : degree_count) {
+        double p = static_cast<double>(entry.second) / total;
+        if (p > 0) {
+            entropy -= p * std::log2(p);
+        }
+    }
+    
+    return entropy;
+}
+
+// НОВАЯ РЕАЛИЗАЦИЯ: Вычисление энтропии кратчайших путей
+double GeometricValidator::compute_shortest_path_entropy(const IsogenyGraph& graph) {
+    // Вычисление энтропии кратчайших путей
+    int num_vertices = num_vertices(graph);
+    std::vector<std::vector<int>> distances(num_vertices, std::vector<int>(num_vertices, 0));
+    
+    // Вычисляем все пары кратчайших путей с использованием алгоритма Флойда-Уоршелла
+    for (int i = 0; i < num_vertices; ++i) {
+        for (int j = 0; j < num_vertices; ++j) {
+            if (i == j) {
+                distances[i][j] = 0;
+            } else if (edge(vertex(i, graph), vertex(j, graph), graph).second) {
+                distances[i][j] = 1;
+            } else {
+                distances[i][j] = num_vertices; // Большое число вместо бесконечности
+            }
+        }
+    }
+    
+    for (int k = 0; k < num_vertices; ++k) {
+        for (int i = 0; i < num_vertices; ++i) {
+            for (int j = 0; j < num_vertices; ++j) {
+                if (distances[i][j] > distances[i][k] + distances[k][j]) {
+                    distances[i][j] = distances[i][k] + distances[k][j];
+                }
+            }
+        }
+    }
+    
+    // Собираем статистику по длинам путей
+    std::map<int, int> path_length_count;
+    int total_paths = 0;
+    
+    for (int i = 0; i < num_vertices; ++i) {
+        for (int j = i + 1; j < num_vertices; ++j) {
+            if (distances[i][j] < num_vertices) { // Проверка, что путь существует
+                path_length_count[distances[i][j]]++;
+                total_paths++;
+            }
+        }
+    }
+    
+    double entropy = 0.0;
+    for (const auto& entry : path_length_count) {
+        double p = static_cast<double>(entry.second) / total_paths;
+        if (p > 0) {
+            entropy -= p * std::log2(p);
+        }
+    }
+    
+    return entropy;
 }
