@@ -1,209 +1,325 @@
-#ifndef SECURE_AUDIT_LOGGER_H
-#define SECURE_AUDIT_LOGGER_H
+#ifndef TORUSCSIDH_SECURE_AUDIT_LOGGER_H
+#define TORUSCSIDH_SECURE_AUDIT_LOGGER_H
 
-#include <fstream>
 #include <string>
-#include <mutex>
 #include <vector>
+#include <mutex>
 #include <ctime>
+#include <fstream>
+#include <filesystem>
 #include <sodium.h>
 #include "security_constants.h"
-#include "code_integrity.h"
+#include "bech32m.h"
 #include "postquantum_hash.h"
 
+namespace toruscsidh {
+
 /**
- * @brief Класс для безопасного аудита системы
+ * @brief Класс для безопасного аудита и логирования
+ * 
+ * Обеспечивает защищенное логирование событий с шифрованием, проверкой целостности
+ * и защитой от атак по времени. Все операции с логами выполняются за постоянное время.
  */
 class SecureAuditLogger {
 public:
     /**
      * @brief Получение единственного экземпляра (Singleton)
-     * @return Указатель на экземпляр
+     * 
+     * @return Ссылка на экземпляр SecureAuditLogger
      */
     static SecureAuditLogger& get_instance();
     
     /**
-     * @brief Запись события в журнал аудита
-     * @param event_type Тип события
-     * @param message Сообщение
-     * @param is_critical Является ли событие критическим
-     */
-    void log_event(const std::string& event_type, 
-                  const std::string& message, 
-                  bool is_critical);
-    
-    /**
-     * @brief Установка уровня логирования
-     * @param level Уровень логирования
-     */
-    void set_log_level(int level);
-    
-    /**
-     * @brief Получение текущего уровня логирования
-     * @return Уровень логирования
-     */
-    int get_log_level() const;
-    
-    /**
-     * @brief Закрытие журнала
-     */
-    void close();
-
-private:
-    std::ofstream log_file;            ///< Файл журнала
-    std::mutex log_mutex;              ///< Мьютекс для защиты журнала
-    int log_level;                     ///< Уровень логирования
-    CodeIntegrityProtection& code_integrity; ///< Ссылка на систему целостности
-    
-    /**
-     * @brief Конструктор
-     */
-    SecureAuditLogger();
-    
-    /**
-     * @brief Деструктор
-     */
-    ~SecureAuditLogger();
-    
-    /**
-     * @brief Инициализация журнала
+     * @brief Инициализация системы аудита
+     * 
      * @return true, если инициализация прошла успешно
      */
     bool initialize();
     
     /**
+     * @brief Логирование события
+     * 
+     * @param category Категория события (security, system, key, signature)
+     * @param message Сообщение для логирования
+     * @param is_critical Является ли событие критическим
+     */
+    void log_event(const std::string& category, const std::string& message, bool is_critical);
+    
+    /**
+     * @brief Обработка аномалии
+     * 
+     * Регистрирует аномалию и принимает меры в зависимости от серьезности.
+     * 
+     * @param anomaly_type Тип аномалии
+     * @param description Описание аномалии
+     */
+    void handle_anomaly(const std::string& anomaly_type, const std::string& description);
+    
+    /**
+     * @brief Сброс счетчика аномалий
+     * 
+     * Вызывается после успешного восстановления или при сбросе состояния.
+     */
+    void reset_anomaly_counter();
+    
+    /**
+     * @brief Проверка, что система в нормальном состоянии
+     * 
+     * @return true, если система в нормальном состоянии
+     */
+    bool is_system_normal() const;
+    
+    /**
+     * @brief Получение количества аномалий
+     * 
+     * @return Количество аномалий
+     */
+    int get_anomaly_count() const;
+    
+    /**
+     * @brief Получение времени последней аномалии
+     * 
+     * @return Время последней аномалии
+     */
+    time_t get_last_anomaly_time() const;
+    
+    /**
      * @brief Шифрование имени файла журнала
-     * @param filename Имя файла
+     * 
+     * @param filename Имя файла для шифрования
      * @return Зашифрованное имя файла
      */
     std::string encrypt_filename(const std::string& filename);
     
     /**
      * @brief Расшифровка имени файла журнала
-     * @param encrypted_name Зашифрованное имя файла
+     * 
+     * @param encrypted_filename Зашифрованное имя файла
      * @return Расшифрованное имя файла
      */
-    std::string decrypt_filename(const std::string& encrypted_name);
+    std::string decrypt_filename(const std::string& encrypted_filename);
+    
+    /**
+     * @brief Проверка целостности журнала
+     * 
+     * @param log_file Файл журнала для проверки
+     * @return true, если журнал цел
+     */
+    bool verify_log_integrity(const std::string& log_file);
+    
+    /**
+     * @brief Получение зашифрованного содержимого журнала
+     * 
+     * @param log_file Файл журнала
+     * @return Зашифрованное содержимое
+     */
+    std::vector<unsigned char> get_encrypted_log_content(const std::string& log_file);
+    
+    /**
+     * @brief Запись зашифрованного содержимого в журнал
+     * 
+     * @param log_file Файл журнала
+     * @param content Содержимое для записи
+     * @return true, если запись прошла успешно
+     */
+    bool write_encrypted_log_content(const std::string& log_file, const std::vector<unsigned char>& content);
+    
+    /**
+     * @brief Получение текущего уровня логирования
+     * 
+     * @return Уровень логирования
+     */
+    int get_log_level() const;
+    
+    /**
+     * @brief Установка уровня логирования
+     * 
+     * @param level Уровень логирования
+     */
+    void set_log_level(int level);
+    
+    /**
+     * @brief Очистка старых записей журнала
+     * 
+     * Удаляет записи старше указанного времени.
+     * 
+     * @param max_age Максимальный возраст записей в секундах
+     */
+    void clean_old_logs(time_t max_age);
+    
+    /**
+     * @brief Получение защищенного ключа для шифрования журналов
+     * 
+     * @return Ключ для шифрования
+     */
+    const std::vector<unsigned char>& get_encryption_key() const;
+    
+    /**
+     * @brief Получение HMAC ключа для проверки целостности журналов
+     * 
+     * @return HMAC ключ
+     */
+    const std::vector<unsigned char>& get_hmac_key() const;
+    
+    /**
+     * @brief Создание HMAC для содержимого журнала
+     * 
+     * @param content Содержимое журнала
+     * @return HMAC
+     */
+    std::vector<unsigned char> create_log_hmac(const std::vector<unsigned char>& content);
+    
+    /**
+     * @brief Проверка HMAC содержимого журнала
+     * 
+     * @param content Содержимое журнала
+     * @param mac Проверяемый MAC
+     * @return true, если MAC верен
+     */
+    bool verify_log_hmac(const std::vector<unsigned char>& content, 
+                        const std::vector<unsigned char>& mac);
+    
+    /**
+     * @brief Обеспечение постоянного времени выполнения
+     * 
+     * Добавляет задержку, чтобы операция выполнялась за строго определенное время.
+     * 
+     * @param target_time Целевое время выполнения
+     */
+    void ensure_constant_time(const std::chrono::microseconds& target_time) const;
+    
+    /**
+     * @brief Проверка, что операция выполнена за постоянное время
+     * 
+     * @return true, если операция выполнена за постоянное время
+     */
+    bool is_constant_time_operation() const;
+    
+    /**
+     * @brief Генерация уникального идентификатора события
+     * 
+     * @return Уникальный идентификатор
+     */
+    std::string generate_event_id();
+    
+    /**
+     * @brief Получение времени последней записи в журнал
+     * 
+     * @return Время последней записи
+     */
+    time_t get_last_log_time() const;
+    
+    /**
+     * @brief Проверка, что журнал не переполнен
+     * 
+     * @return true, если журнал не переполнен
+     */
+    bool is_log_not_full() const;
+    
+    /**
+     * @brief Получение максимального размера журнала
+     * 
+     * @return Максимальный размер в байтах
+     */
+    size_t get_max_log_size() const;
+    
+    /**
+     * @brief Установка максимального размера журнала
+     * 
+     * @param size Максимальный размер в байтах
+     */
+    void set_max_log_size(size_t size);
+    
+private:
+    // Конструктор и деструктор (Singleton)
+    SecureAuditLogger();
+    ~SecureAuditLogger();
+    
+    // Запрет копирования
+    SecureAuditLogger(const SecureAuditLogger&) = delete;
+    SecureAuditLogger& operator=(const SecureAuditLogger&) = delete;
+    
+    /**
+     * @brief Создание каталога для журналов, если он не существует
+     */
+    void create_log_directory();
+    
+    /**
+     * @brief Получение текущего файла журнала
+     * 
+     * @return Имя текущего файла журнала
+     */
+    std::string get_current_log_file();
+    
+    /**
+     * @brief Шифрование содержимого журнала
+     * 
+     * @param content Содержимое для шифрования
+     * @return Зашифрованное содержимое
+     */
+    std::vector<unsigned char> encrypt_log_content(const std::vector<unsigned char>& content);
+    
+    /**
+     * @brief Расшифровка содержимого журнала
+     * 
+     * @param encrypted_content Зашифрованное содержимое
+     * @return Расшифрованное содержимое
+     */
+    std::vector<unsigned char> decrypt_log_content(const std::vector<unsigned char>& encrypted_content);
+    
+    /**
+     * @brief Проверка, что журнал готов к использованию
+     * 
+     * @return true, если журнал готов
+     */
+    bool is_log_ready() const;
+    
+    // Статический экземпляр (Singleton)
+    static SecureAuditLogger* instance_;
+    
+    // Мьютекс для синхронизации доступа
+    std::mutex log_mutex_;
+    
+    // Ключ для шифрования журналов
+    std::vector<unsigned char> encryption_key_;
+    
+    // Ключ для HMAC проверки целостности
+    std::vector<unsigned char> hmac_key_;
+    
+    // Каталог для журналов
+    std::string log_directory_;
+    
+    // Текущий файл журнала
+    std::string current_log_file_;
+    
+    // Счетчик аномалий
+    int anomaly_count_;
+    
+    // Время последней аномалии
+    time_t last_anomaly_time_;
+    
+    // Время последней записи в журнал
+    time_t last_log_time_;
+    
+    // Уровень логирования
+    int log_level_;
+    
+    // Максимальный размер журнала
+    size_t max_log_size_;
+    
+    // Флаг инициализации
+    bool is_initialized_;
+    
+    // Константы безопасности
+    static constexpr size_t ENCRYPTION_KEY_SIZE = 32;
+    static constexpr size_t HMAC_KEY_SIZE = 32;
+    static constexpr size_t MAX_LOG_SIZE = 10 * 1024 * 1024; // 10 MB
+    static constexpr int DEFAULT_LOG_LEVEL = 2; // 0 - none, 1 - errors, 2 - warnings, 3 - info, 4 - debug
+    static constexpr size_t LOG_FILE_RETENTION = 30; // дней
+    static constexpr size_t MAX_ANOMALY_COUNT = 3;
+    static constexpr size_t ANOMALY_RESET_INTERVAL = 24 * 60 * 60; // 24 часа
 };
 
-SecureAuditLogger::SecureAuditLogger()
-    : log_level(1), 
-      code_integrity(CodeIntegrityProtection::getInstance()) {
-    
-    if (!initialize()) {
-        throw std::runtime_error("Failed to initialize audit logger");
-    }
-}
+} // namespace toruscsidh
 
-SecureAuditLogger::~SecureAuditLogger() {
-    close();
-}
-
-SecureAuditLogger& SecureAuditLogger::get_instance() {
-    static SecureAuditLogger instance;
-    return instance;
-}
-
-void SecureAuditLogger::log_event(const std::string& event_type, 
-                                 const std::string& message, 
-                                 bool is_critical) {
-    std::lock_guard<std::mutex> lock(log_mutex);
-    
-    if (!log_file.is_open()) {
-        if (!initialize()) {
-            return;
-        }
-    }
-    
-    // Проверка целостности системы перед логированием
-    if (!code_integrity.system_integrity_check()) {
-        if (!code_integrity.self_recovery()) {
-            return;
-        }
-    }
-    
-    // Форматирование времени
-    time_t now = time(nullptr);
-    struct tm timeinfo;
-    localtime_r(&now, &timeinfo);
-    
-    char time_str[20];
-    strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", &timeinfo);
-    
-    // Формирование записи
-    std::string log_entry = std::string(time_str) + " [" + event_type + "] " + message;
-    if (is_critical) {
-        log_entry += " [CRITICAL]";
-    }
-    log_entry += "\n";
-    
-    // Шифрование записи перед записью в файл
-    std::vector<unsigned char> nonce(crypto_secretbox_NONCEBYTES);
-    randombytes_buf(nonce.data(), nonce.size());
-    
-    std::vector<unsigned char> plaintext(log_entry.begin(), log_entry.end());
-    std::vector<unsigned char> ciphertext(plaintext.size() + crypto_secretbox_MACBYTES);
-    
-    crypto_secretbox_easy(ciphertext.data(), 
-                         plaintext.data(), 
-                         plaintext.size(), 
-                         nonce.data(), 
-                         code_integrity.get_backup_key().data());
-    
-    // Запись в файл
-    log_file.write(reinterpret_cast<const char*>(nonce.data()), nonce.size());
-    log_file.write(reinterpret_cast<const char*>(ciphertext.data()), ciphertext.size());
-    log_file.flush();
-}
-
-void SecureAuditLogger::set_log_level(int level) {
-    std::lock_guard<std::mutex> lock(log_mutex);
-    log_level = level;
-}
-
-int SecureAuditLogger::get_log_level() const {
-    return log_level;
-}
-
-void SecureAuditLogger::close() {
-    std::lock_guard<std::mutex> lock(log_mutex);
-    if (log_file.is_open()) {
-        log_file.close();
-    }
-}
-
-bool SecureAuditLogger::initialize() {
-    // Проверка целостности системы перед инициализацией
-    if (!code_integrity.system_integrity_check()) {
-        return false;
-    }
-    
-    // Генерация безопасного имени файла лога
-    std::string log_filename = "toruscsidh_audit_" + std::to_string(time(nullptr)) + ".log";
-    std::string encrypted_name = encrypt_filename(log_filename);
-    
-    // Декодирование для открытия файла
-    std::string decrypted_name = decrypt_filename(encrypted_name);
-    
-    // Открытие файла
-    log_file.open(decrypted_name, std::ios::app | std::ios::binary);
-    return log_file.is_open();
-}
-
-std::string SecureAuditLogger::encrypt_filename(const std::string& filename) {
-    std::string encrypted_name = filename;
-    for (size_t i = 0; i < encrypted_name.size(); i++) {
-        encrypted_name[i] ^= (i % 256);
-    }
-    return encrypted_name;
-}
-
-std::string SecureAuditLogger::decrypt_filename(const std::string& encrypted_name) {
-    std::string decrypted_name = encrypted_name;
-    for (size_t i = 0; i < decrypted_name.size(); i++) {
-        decrypted_name[i] ^= (i % 256);
-    }
-    return decrypted_name;
-}
-
-#endif // SECURE_AUDIT_LOGGER_H
+#endif // TORUSCSIDH_SECURE_AUDIT_LOGGER_H
