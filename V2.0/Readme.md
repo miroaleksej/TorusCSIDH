@@ -1,96 +1,192 @@
-# TorusCSIDH 2.0 - Post-Quantum Cryptographic System
+# TorusCSIDH: Постквантовая криптографическая система на основе CSIDH с геометрической проверкой безопасности (работы поинаписанию кода не завершены. На данном этапе - это концепт!)
 
-## Overview
+![Build Status](https://github.com/toruscsidh/toruscsidh/workflows/Build/badge.svg)
+![Security Scan](https://github.com/toruscsidh/toruscsidh/workflows/Security%20Scan/badge.svg)
+![License](https://img.shields.io/badge/License-MIT-blue.svg)
 
-TorusCSIDH is a post-quantum cryptographic system based on the Commutative Supersingular Isogeny Diffie-Hellman (CSIDH) protocol. This implementation provides quantum-resistant cryptographic operations designed to withstand attacks from future quantum computers while maintaining compatibility with existing infrastructure.
+**TorusCSIDH** — это высокобезопасная постквантовая криптографическая библиотека, реализующая протокол CSIDH (Commutative Supersingular Isogeny Diffie-Hellman) с инновационной геометрической проверкой безопасности. Система предназначена для защиты от квантовых атак и обеспечивает долгосрочную безопасность криптографических приложений, включая интеграцию с Bitcoin.
 
-Unlike traditional cryptographic systems that rely on integer factorization or discrete logarithm problems (which are vulnerable to Shor's algorithm), TorusCSIDH leverages the mathematical complexity of isogenies between supersingular elliptic curves, representing one of the most promising approaches to post-quantum cryptography.
+## Особенности
 
-## Key Features
+- **Постквантовая безопасность**: Устойчивость к атакам на основе квантовых компьютеров
+- **Геометрическая проверка безопасности** с 7 критериями:
+  - Цикломатическое число
+  - Спектральный анализ (спектральный зазор)
+  - Коэффициент кластеризации
+  - Энтропия распределения степеней
+  - Энтропия распределения кратчайших путей
+  - Расстояние до базовой кривой
+  - Гибридная оценка на основе всех критериев
+- **Защита от атак по побочным каналам**: Все криптографические операции выполняются за постоянное время
+- **Система проверки целостности кода**: Автоматическое обнаружение и восстановление после атак
+- **Безопасная реализация RFC6979**: Детерминированная генерация подписей
+- **Формат адреса Bech32m** (BIP-350): Совместимость с постквантовыми адресами
+- **Интеграция с Bitcoin**: Поддержка без хардфорка
 
-- **Post-quantum security**: Designed to resist attacks from both classical and quantum computers
-- **Geometric security validation**: Implements advanced graph theory analysis of isogeny graphs to detect potential vulnerabilities
-- **Constant-time execution**: Protection against timing side-channel attacks through rigorous constant-time implementation
-- **Self-integrity verification**: Built-in system integrity checks with recovery mechanisms
-- **RFC 6979 compliant**: Deterministic signature generation that prevents private key leakage
-- **Bitcoin integration**: Generates addresses in Bech32m format for potential post-quantum Bitcoin applications
-- **Multiple security levels**: Support for 128-bit, 192-bit, and 256-bit security levels
+## Архитектура безопасности
 
-## System Requirements
+TorusCSIDH использует двухуровневую систему безопасности:
 
-- CMake 3.10 or higher
-- Boost 1.65 (system and graph components)
-- Eigen3 3.3
-- RELIC 0.3
+1. **Алгебраический уровень**: Традиционная безопасность на основе сложности задачи вычисления изогений
+2. **Геометрический уровень**: Дополнительная защита через анализ топологических свойств графа изогений
+
+> **Важно**: Геометрическая проверка **не заменяет** алгебраическую безопасность, а **дополняет** её. Эта защита не доказана в теоретико-криптографическом смысле, но практически обоснована: если злоумышленник не может создать кривую, проходящую геометрическую проверку, не зная секрета, — атака становится невозможной.
+
+## Установка
+
+### Требования
+
+- CMake 3.10 или новее
+- Компилятор с поддержкой C++17
+- Boost 1.65 или новее
 - OpenSSL
 - Libsodium
 - GMP
-- C++17 compatible compiler
+- BLAKE3
 
-## Build Instructions
+### Сборка
 
-1. Clone the repository:
-```
-git clone https://github.com/yourusername/toruscsidh.git
+```bash
+git clone https://github.com/toruscsidh/toruscsidh.git
 cd toruscsidh
-```
-
-2. Create build directory and compile:
-```
-mkdir -p build
+mkdir build
 cd build
 cmake ..
 make
 ```
 
-3. Run the example application:
+### Установка
+
+```bash
+sudo make install
 ```
-./toruscsidh
+
+## Использование
+
+### Быстрый старт
+
+```cpp
+#include <toruscsidh/toruscsidh.h>
+#include <iostream>
+
+int main() {
+    try {
+        // Создание системы с уровнем безопасности 128 бит
+        TorusCSIDH csidh(SecurityConstants::SecurityLevel::LEVEL_128);
+        
+        // Инициализация системы
+        csidh.initialize();
+        
+        // Генерация ключевой пары
+        csidh.generate_key_pair();
+        
+        // Генерация адреса
+        std::string address = csidh.generate_address();
+        std::cout << "Сгенерированный адрес: " << address << std::endl;
+        
+        // Подпись сообщения
+        std::string message = "Hello, post-quantum world!";
+        std::vector<unsigned char> signature = csidh.sign(
+            std::vector<unsigned char>(message.begin(), message.end())
+        );
+        
+        // Проверка подписи
+        bool is_valid = csidh.verify(
+            std::vector<unsigned char>(message.begin(), message.end()),
+            signature
+        );
+        std::cout << "Подпись " << (is_valid ? "валидна" : "невалидна") << std::endl;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Ошибка: " << e.what() << std::endl;
+        return 1;
+    }
+    return 0;
+}
 ```
 
-## Development Status
+### Формат адреса
 
-This is version 2.0 of the TorusCSIDH implementation. Please note that this system is currently in active development. The following important considerations apply:
+TorusCSIDH использует новый формат адреса, совместимый с Bech32m (BIP-350):
 
-- No comprehensive test suite has been implemented yet
-- The implementation should be considered experimental
-- Not recommended for production use at this stage
-- Security analysis is ongoing
+```
+tcidh1<encoded_payload>
+```
 
-## Security Considerations
+Пример:
+```
+tcidh1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9x7q9
+```
 
-While TorusCSIDH is designed with multiple layers of security, this implementation is still under development and has not undergone formal security audits. The geometric validation system provides an additional security layer beyond standard CSIDH implementations, but users should exercise caution when considering this for any security-critical applications.
+### Подпись транзакции
 
-## Contributing
+Подпись в TorusCSIDH работает аналогично ECDSA, но с улучшенной безопасностью:
 
-Contributions to improve the security, performance, and documentation of TorusCSIDH are welcome. Please follow these steps:
+**Подписывание:**
+1. Генерация эфемерного ключа $d_{\text{eph}}$
+2. Вычисление $E_{\text{eph}} = [d_{\text{eph}}]E_0$
+3. Вычисление общего секрета $S = j([d_A]E_{\text{eph}})$
+4. Формирование подписи: $\sigma = \big( j(E_{\text{eph}}),\ H(M \parallel S) \big)$
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+**Проверка:**
+1. Восстановление $E_{\text{eph}}$
+2. Вычисление $S' = j([d_{\text{eph}}]E_A)$ (без знания $d_A$!)
+3. Проверка: $h \stackrel{?}{=} H(M \parallel S')$
 
-When contributing, please ensure your code follows the existing style and includes appropriate documentation.
+**Преимущество:** повторное использование $d_{\text{eph}}$ **не компрометирует** $d_A$ — в отличие от ECDSA.
 
-## License
+## Интеграция в Bitcoin
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+TorusCSIDH может быть интегрирован в Bitcoin без хардфорка:
 
-## Contact
+- **ScriptPubKey**: `OP_1 <32-byte SHA256(j)>` — аналогично Taproot
+- **Witness**: `[signature, j_pub]`
+- **Размеры**:
+  - Открытый ключ: 64 байта
+  - Подпись: 96 байт
 
-For questions, suggestions, or security concerns regarding TorusCSIDH, please contact:
+## Документация
 
-miro-aleksej@yandex.ru
+Полная документация доступна в каталоге [docs](docs/).
 
-Please note that as this is a development version, responses to technical inquiries may be delayed while the implementation is being refined.
+- [Архитектурные решения](docs/architecture.md)
+- [Анализ безопасности](docs/security_analysis.md)
+- [Геометрические критерии безопасности](docs/geometric_validation.md)
+- [Руководство по использованию](docs/usage/getting_started.md)
+- [Примеры кода](docs/usage/examples.md)
 
-## Acknowledgments
+## Тестирование
 
-- The CSIDH protocol authors
-- The developers of RELIC, Libsodium, and other cryptographic libraries used in this implementation
-- The post-quantum cryptography research community for their valuable contributions to the field
+Для запуска тестов:
+
+```bash
+cd build
+make test
+```
+
+## Лицензия
+
+Этот проект лицензирован в соответствии с MIT License - подробности см. в файле [LICENSE](LICENSE).
+
+## Безопасность
+
+Если вы обнаружили уязвимость, пожалуйста, ознакомьтесь с нашими [инструкциями по безопасности](SECURITY.md).
+
+## Участие в проекте
+
+Мы приветствуем вклад в проект! Пожалуйста, ознакомьтесь с нашим [руководством по внесению изменений](CONTRIBUTING.md) перед отправкой PR.
+
+## Ссылки
+
+- [Оригинальная статья о CSIDH](https://eprint.iacr.org/2018/383)
+- [BIP-350: Bech32m для постквантовых адресов](https://github.com/bitcoin/bips/blob/master/bip-0350.mediawiki)
+- [BLAKE3: современная постквантовая хеш-функция](https://github.com/BLAKE3-team/BLAKE3)
+
+## Контакты
+
+- Email: miro-aleksej@yandex.ru
+
 
 ---
 
-*This is a development version. Use at your own risk. Not suitable for production environments.*
+**TorusCSIDH** © 2025. Создано с заботой о будущем криптографии.
