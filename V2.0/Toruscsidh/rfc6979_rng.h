@@ -1,182 +1,293 @@
-#ifndef RFC6979_RNG_H
-#define RFC6979_RNG_H
+#ifndef TORUSCSIDH_RFC6979_RNG_H
+#define TORUSCSIDH_RFC6979_RNG_H
 
 #include <vector>
-#include <sodium.h>
-#include <cstdint>
 #include <gmpxx.h>
-#include "postquantum_hash.h"
+#include <sodium.h>
 #include "security_constants.h"
+#include "elliptic_curve.h"
+#include "postquantum_hash.h"
+
+namespace toruscsidh {
 
 /**
- * @brief Класс для генерации детерминированных случайных чисел по RFC 6979
+ * @brief Генератор случайных чисел по RFC6979
  * 
- * Реализует безопасную генерацию k-значений для подписей,
- * соответствующую RFC 6979, но адаптированную для постквантовых систем.
+ * Реализует детерминированный алгоритм генерации случайных чисел для цифровых подписей,
+ * как описано в RFC6979. Этот алгоритм предотвращает утечки секретного ключа через
+ * недостаток энтропии и обеспечивает детерминированность процесса подписания.
  */
-class Rfc6979Rng {
+class RFC6979_RNG {
 public:
     /**
-     * @brief Конструктор
-     * @param p Параметр поля (простое число)
+     * @brief Генерация случайного числа по RFC6979
+     * 
+     * Генерирует детерминированное случайное число для использования в подписи.
+     * 
      * @param private_key Приватный ключ
-     * @param max_key_magnitude Максимальная величина ключа
+     * @param message Хешированное сообщение
+     * @param curve_params Параметры кривой
+     * @return Случайное число
      */
-    Rfc6979Rng(const GmpRaii& p, 
-               const std::vector<short>& private_key,
-               int max_key_magnitude);
+    GmpRaii generate(const GmpRaii& private_key,
+                    const std::vector<unsigned char>& message,
+                    const SecurityConstants::CurveParams& curve_params);
     
     /**
-     * @brief Деструктор
+     * @brief Генерация случайного числа для изогении
+     * 
+     * Генерирует детерминированное случайное число, подходящее для вычисления изогений.
+     * 
+     * @param private_key Приватный ключ
+     * @param message Хешированное сообщение
+     * @param curve_params Параметры кривой
+     * @param prime Простое число для ограничения
+     * @return Случайное число для изогении
      */
-    ~Rfc6979Rng();
+    GmpRaii generate_for_isogeny(const GmpRaii& private_key,
+                               const std::vector<unsigned char>& message,
+                               const SecurityConstants::CurveParams& curve_params,
+                               const GmpRaii& prime);
     
     /**
-     * @brief Генерация детерминированного k-значения для подписи
-     * @param message_hash Хеш сообщения
-     * @return k-значение
+     * @brief Генерация случайного числа с учетом геометрических ограничений
+     * 
+     * Генерирует случайное число, соответствующее требованиям геометрического валидатора.
+     * 
+     * @param private_key Приватный ключ
+     * @param message Хешированное сообщение
+     * @param curve_params Параметры кривой
+     * @param geometric_validator Геометрический валидатор
+     * @param primes Простые числа для системы
+     * @return Случайное число
      */
-    GmpRaii generate_k(const std::vector<unsigned char>& message_hash);
+    GmpRaii generate_with_geometric_constraints(
+        const GmpRaii& private_key,
+        const std::vector<unsigned char>& message,
+        const SecurityConstants::CurveParams& curve_params,
+        const GeometricValidator& geometric_validator,
+        const std::vector<GmpRaii>& primes);
     
     /**
-     * @brief Генерация детерминированного эфемерного ключа
-     * @param message Сообщение
-     * @return Эфемерный ключ
+     * @brief Проверка, что сгенерированное число безопасно
+     * 
+     * Проверяет, что случайное число соответствует всем требованиям безопасности.
+     * 
+     * @param k Сгенерированное число
+     * @param curve_params Параметры кривой
+     * @return true, если число безопасно
      */
-    std::vector<short> generate_ephemeral_key(const std::string& message);
+    bool is_safe_random(const GmpRaii& k, const SecurityConstants::CurveParams& curve_params) const;
     
     /**
-     * @brief Генерация случайного целого числа в диапазоне
-     * @param min Минимальное значение (включая)
-     * @param max Максимальное значение (не включая)
-     * @return Случайное число в диапазоне [min, max)
+     * @brief Проверка на слабые значения
+     * 
+     * Обнаруживает значения, которые могут сделать систему уязвимой к атакам.
+     * 
+     * @param k Сгенерированное число
+     * @return true, если значение слабое
      */
-    int generate_random_exponent(int max_magnitude);
+    bool is_weak_value(const GmpRaii& k) const;
     
     /**
-     * @brief Генерация случайных байтов с использованием криптографического RNG
-     * @param output Выходной буфер
+     * @brief Проверка, что число соответствует геометрическим ограничениям
+     * 
+     * @param k Сгенерированное число
+     * @param geometric_validator Геометрический валидатор
+     * @param primes Простые числа для системы
+     * @return true, если число соответствует ограничениям
      */
-    void generate_random_bytes(std::vector<unsigned char>& output);
-
+    bool satisfies_geometric_constraints(
+        const GmpRaii& k,
+        const GeometricValidator& geometric_validator,
+        const std::vector<GmpRaii>& primes) const;
+    
+    /**
+     * @brief Генерация соли для дополнительной защиты
+     * 
+     * @return Случайная соль
+     */
+    static std::vector<unsigned char> generate_salt();
+    
+    /**
+     * @brief Генерация случайного числа с постоянным временем выполнения
+     * 
+     * Обеспечивает, что операция выполняется за строго определенное время,
+     * предотвращая атаки по времени.
+     * 
+     * @param private_key Приватный ключ
+     * @param message Хешированное сообщение
+     * @param curve_params Параметры кривой
+     * @param target_time Целевое время выполнения
+     * @return Случайное число
+     */
+    GmpRaii generate_constant_time(
+        const GmpRaii& private_key,
+        const std::vector<unsigned char>& message,
+        const SecurityConstants::CurveParams& curve_params,
+        const std::chrono::microseconds& target_time);
+    
+    /**
+     * @brief Проверка целостности генератора
+     * 
+     * @return true, если генератор цел
+     */
+    bool verify_integrity() const;
+    
+    /**
+     * @brief Проверка, что генератор готов к использованию
+     * 
+     * @return true, если генератор готов
+     */
+    bool is_ready() const;
+    
+    /**
+     * @brief Инициализация генератора
+     */
+    void initialize();
+    
+    /**
+     * @brief Деинициализация генератора
+     */
+    void finalize();
+    
+    /**
+     * @brief Получение текущего состояния генератора
+     * 
+     * @return Состояние генератора
+     */
+    std::vector<unsigned char> get_state() const;
+    
+    /**
+     * @brief Восстановление состояния генератора
+     * 
+     * @param state Состояние генератора
+     */
+    void restore_state(const std::vector<unsigned char>& state);
+    
 private:
-    GmpRaii p;                       ///< Параметр поля (простое число)
-    std::vector<short> private_key;  ///< Приватный ключ
-    int max_key_magnitude;           ///< Максимальная величина ключа
-    SecureRandom secure_random;      ///< Безопасный генератор случайных чисел
+    /**
+     * @brief Выполнение шага алгоритма RFC6979
+     * 
+     * @param h1 Хеш сообщения
+     * @param x Приватный ключ
+     * @param q Порядок группы
+     * @param alg Хеш-алгоритм
+     * @return Случайное число
+     */
+    GmpRaii rfc6979_step(const std::vector<unsigned char>& h1,
+                        const GmpRaii& x,
+                        const GmpRaii& q,
+                        const std::string& alg) const;
+    
+    /**
+     * @brief Вычисление V и K для алгоритма RFC6979
+     * 
+     * @param h1 Хеш сообщения
+     * @param x Приватный ключ
+     * @param q Порядок группы
+     * @param alg Хеш-алгоритм
+     * @param V Выходной параметр V
+     * @param K Выходной параметр K
+     */
+    void compute_v_k(const std::vector<unsigned char>& h1,
+                    const GmpRaii& x,
+                    const GmpRaii& q,
+                    const std::string& alg,
+                    std::vector<unsigned char>& V,
+                    std::vector<unsigned char>& K) const;
+    
+    /**
+     * @brief Генерация случайного числа с использованием V и K
+     * 
+     * @param V Параметр V
+     * @param K Параметр K
+     * @param h1 Хеш сообщения
+     * @param x Приватный ключ
+     * @param q Порядок группы
+     * @return Случайное число
+     */
+    GmpRaii generate_from_v_k(const std::vector<unsigned char>& V,
+                            const std::vector<unsigned char>& K,
+                            const std::vector<unsigned char>& h1,
+                            const GmpRaii& x,
+                            const GmpRaii& q) const;
+    
+    /**
+     * @brief Проверка, что число находится в допустимом диапазоне
+     * 
+     * @param k Число для проверки
+     * @param q Порядок группы
+     * @return true, если число в допустимом диапазоне
+     */
+    bool is_in_range(const GmpRaii& k, const GmpRaii& q) const;
+    
+    /**
+     * @brief Проверка, что число не является слабым
+     * 
+     * @param k Число для проверки
+     * @return true, если число не слабое
+     */
+    bool is_not_weak(const GmpRaii& k) const;
+    
+    /**
+     * @brief Вычисление хеша для алгоритма RFC6979
+     * 
+     * @param V Параметр V
+     * @param T Буфер данных
+     * @param alg Хеш-алгоритм
+     * @return Хеш
+     */
+    std::vector<unsigned char> compute_hmac(const std::vector<unsigned char>& V,
+                                         const std::vector<unsigned char>& T,
+                                         const std::string& alg) const;
+    
+    /**
+     * @brief Инициализация HMAC ключа
+     * 
+     * @param K HMAC ключ
+     * @param alg Хеш-алгоритм
+     */
+    void init_hmac_key(std::vector<unsigned char>& K, const std::string& alg) const;
+    
+    /**
+     * @brief Выполнение шага HMAC
+     * 
+     * @param K HMAC ключ
+     * @param V Параметр V
+     * @param alg Хеш-алгоритм
+     * @param h1 Хеш сообщения
+     * @param x Приватный ключ
+     * @param t Битовый флаг
+     */
+    void hmac_step(std::vector<unsigned char>& K,
+                 std::vector<unsigned char>& V,
+                 const std::string& alg,
+                 const std::vector<unsigned char>& h1,
+                 const GmpRaii& x,
+                 unsigned char t) const;
+    
+    /**
+     * @brief Обеспечение постоянного времени выполнения
+     * 
+     * Добавляет задержку, чтобы операция выполнялась за строго определенное время.
+     * 
+     * @param target_time Целевое время выполнения
+     */
+    void ensure_constant_time(const std::chrono::microseconds& target_time) const;
+    
+    // Флаг инициализации
+    bool is_initialized_;
+    
+    // Текущее время для обеспечения постоянного времени
+    mutable std::chrono::high_resolution_clock::time_point start_time_;
+    
+    // Константы безопасности
+    static constexpr size_t MAX_RETRIES = 1000;
+    static constexpr size_t HMAC_KEY_SIZE = 64;
+    static constexpr size_t SALT_SIZE = 32;
 };
 
-Rfc6979Rng::Rfc6979Rng(const GmpRaii& p, 
-                       const std::vector<short>& private_key,
-                       int max_key_magnitude)
-    : p(p), private_key(private_key), max_key_magnitude(max_key_magnitude) {
-    // Инициализация не требуется, т.к. secure_random инициализируется сам
-}
+} // namespace toruscsidh
 
-Rfc6979Rng::~Rfc6979Rng() {
-    // Очистка не требуется
-}
-
-GmpRaii Rfc6979Rng::generate_k(const std::vector<unsigned char>& message_hash) {
-    // RFC 6979 реализация с использованием постквантовых хеш-функций
-    // Для постквантовой безопасности мы используем BLAKE3 вместо SHA-256
-    
-    // 1. Подготовка приватного ключа для хеширования
-    std::vector<unsigned char> x;
-    for (short val : private_key) {
-        unsigned char bytes[2];
-        bytes[0] = static_cast<unsigned char>(val & 0xFF);
-        bytes[1] = static_cast<unsigned char>((val >> 8) & 0xFF);
-        x.push_back(bytes[0]);
-        x.push_back(bytes[1]);
-    }
-    
-    // 2. Добавление соли для защиты от атак по времени
-    std::vector<unsigned char> salt = PostQuantumHash::create_salt();
-    
-    // 3. Формирование данных для хеширования
-    std::vector<unsigned char> hash_data;
-    hash_data.insert(hash_data.end(), salt.begin(), salt.end());
-    hash_data.insert(hash_data.end(), x.begin(), x.end());
-    hash_data.insert(hash_data.end(), message_hash.begin(), message_hash.end());
-    
-    // 4. Вычисление HMAC с использованием BLAKE3
-    std::vector<unsigned char> k = PostQuantumHash::blake3(hash_data);
-    std::vector<unsigned char> v(crypto_generichash_BYTES, 1);
-    
-    // 5. Итеративное улучшение k и v
-    for (int iter = 0; iter < 10; iter++) {
-        // HMAC(k, v || 0x00 || x || message_hash)
-        std::vector<unsigned char> t;
-        t.insert(t.end(), v.begin(), v.end());
-        t.push_back(0x00);
-        t.insert(t.end(), x.begin(), x.end());
-        t.insert(t.end(), message_hash.begin(), message_hash.end());
-        
-        crypto_hmacstate state;
-        crypto_hmac_sha256_init(&state, k.data(), k.size());
-        crypto_hmac_sha256_update(&state, t.data(), t.size());
-        crypto_hmac_sha256_final(&state, v.data());
-        
-        // HMAC(k, v || 0x01 || x || message_hash)
-        t.clear();
-        t.insert(t.end(), v.begin(), v.end());
-        t.push_back(0x01);
-        t.insert(t.end(), x.begin(), x.end());
-        t.insert(t.end(), message_hash.begin(), message_hash.end());
-        
-        crypto_hmac_sha256_init(&state, k.data(), k.size());
-        crypto_hmac_sha256_update(&state, t.data(), t.size());
-        crypto_hmac_sha256_final(&state, k.data());
-        
-        // Проверка, что k находится в допустимом диапазоне
-        GmpRaii k_value;
-        mpz_import(k_value.get_mpz_t(), k.size(), 1, 1, 1, 0, k.data());
-        
-        if (k_value > GmpRaii(0) && k_value < p) {
-            return k_value;
-        }
-    }
-    
-    // Если после 10 итераций k не был найден, генерируем случайное значение
-    return secure_random.random_uint(p);
-}
-
-std::vector<short> Rfc6979Rng::generate_ephemeral_key(const std::string& message) {
-    // Хеширование сообщения с использованием BLAKE3
-    std::vector<unsigned char> message_hash = PostQuantumHash::blake3(
-        std::vector<unsigned char>(message.begin(), message.end()));
-    
-    // Генерация k-значения
-    GmpRaii k = generate_k(message_hash);
-    
-    // Преобразование k в вектор экспонент
-    std::vector<short> ephemeral_key(private_key.size());
-    
-    // Используем k для генерации эфемерного ключа
-    for (size_t i = 0; i < ephemeral_key.size(); i++) {
-        // Генерация экспоненты в диапазоне [-max_key_magnitude, max_key_magnitude]
-        ephemeral_key[i] = generate_random_exponent(max_key_magnitude);
-    }
-    
-    return ephemeral_key;
-}
-
-int Rfc6979Rng::generate_random_exponent(int max_magnitude) {
-    // Генерация случайного числа в диапазоне [-max_magnitude, max_magnitude]
-    int sign = secure_random.random_byte() & 0x01 ? 1 : -1;
-    int magnitude = secure_random.random_int(0, max_magnitude + 1);
-    
-    // Убедимся, что 0 не генерируется слишком часто
-    if (magnitude == 0 && secure_random.random_byte() % 4 != 0) {
-        magnitude = 1;
-    }
-    
-    return sign * magnitude;
-}
-
-void Rfc6979Rng::generate_random_bytes(std::vector<unsigned char>& output) {
-    secure_random.random_bytes(output);
-}
-
-#endif // RFC6979_RNG_H
+#endif // TORUSCSIDH_RFC6979_RNG_H
