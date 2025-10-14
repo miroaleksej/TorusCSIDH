@@ -1,351 +1,306 @@
 #include "toruscsidh.h"
 #include <iostream>
-#include <iomanip>
-#include <sstream>
-#include <filesystem>
-#include <cmath>
+#include <chrono>
+#include <stdexcept>
+#include <algorithm>
 #include <numeric>
-#include <boost/graph/adjacency_list.hpp>
-#include <boost/graph/cuthill_mckee_ordering.hpp>
+#include <cmath>
+#include <sodium.h>
+#include "secure_random.h"
+#include "security_constants.h"
+#include "secure_audit_logger.h"
 
-// Глобальная функция для безопасной очистки памяти
-void secure_clean_memory(void* ptr, size_t size) {
-    if (ptr == nullptr || size == 0) return;
-    volatile unsigned char* vptr = static_cast<volatile unsigned char*>(ptr);
-    for (size_t i = 0; i < size; i++) {
-        vptr[i] = static_cast<unsigned char>(randombytes_random() % 256);
-    }
-    // Дополнительная очистка с использованием sodium
-    sodium_memzero(ptr, size);
-}
-
-// Безопасная реализация GMP операций с секретными данными
-GmpRaii secure_gmp_random(const GmpRaii& max) {
-    // Генерация случайного числа в безопасном диапазоне
-    size_t bits = mpz_sizeinbase(max.get_mpz_t(), 2);
-    std::vector<unsigned char> random_bytes((bits + 7) / 8);
-    
-    // Используем криптографически безопасный RNG
-    randombytes_buf(random_bytes.data(), random_bytes.size());
-    
-    // Создаем GMP число из случайных байтов
-    GmpRaii result;
-    mpz_import(result.get_mpz_t(), random_bytes.size(), 1, 1, 0, 0, random_bytes.data());
-    
-    // Обеспечиваем, что число в пределах диапазона
-    result %= max;
-    
-    return result;
-}
+namespace toruscsidh {
 
 TorusCSIDH::TorusCSIDH(SecurityConstants::SecurityLevel security_level)
-    : security_level(security_level),
-      initialized(false),
-      rfc6979_rng(nullptr) {
+    : security_level_(security_level),
+      geometric_validator(static_cast<int>(security_level)),
+      base_curve(SecurityConstants::get_base_curve(security_level)) {
     
-    // Инициализация параметров безопасности
-    SecurityConstants::initialize(security_level);
-    
-    // Генерация простых чисел для CSIDH
-    generate_primes();
-    
-    // Инициализация RFC 6979 RNG
-    rfc6979_rng = new Rfc6979Rng(base_curve.get_p(), private_key, params.max_key_magnitude);
-    
-    // Проверка целостности системы
-    if (!code_integrity.system_integrity_check()) {
-        if (!code_integrity.self_recovery()) {
-            throw std::runtime_error("System integrity check failed and recovery unsuccessful");
-        }
-    }
+    // Инициализация системы
+    initialize();
 }
 
 TorusCSIDH::~TorusCSIDH() {
-    // Очистка RFC 6979 RNG
-    delete rfc6979_rng;
-    
-    // Очистка приватного ключа
+    // Очистка секретных данных из памяти
     SecureRandom::secure_clean_memory(private_key.data(), private_key.size() * sizeof(short));
 }
 
 void TorusCSIDH::initialize() {
-    // Инициализация базовой кривой
-    // Для CSIDH-512 базовая кривая y^2 = x^3 + x над F_p, где p = 4l1l2...ln - 1
+    // Проверка целостности системы
+    if (!code_integrity.system_integrity_check()) {
+        throw std::runtime_error("System integrity check failed during initialization");
+    }
     
-    // Создание базовой кривой
-    base_curve = MontgomeryCurve(GmpRaii(0), params.primes[0] * GmpRaii(4) - GmpRaii(1));
+    // Инициализация параметров безопасности
+    initialize_security_params();
+    
+    // Проверка базовых параметров
+    if (!validate_base_parameters()) {
+        throw std::runtime_error("Base parameters validation failed");
+    }
     
     // Генерация ключевой пары
     generate_key_pair();
+    
+    // Проверка сгенерированного ключа
+    if (!is_secure_key()) {
+        throw std::runtime_error("Generated key is not secure");
+    }
+    
+    SecureAuditLogger::get_instance().log_event("system", "TorusCSIDH initialized successfully", false);
 }
 
 void TorusCSIDH::generate_key_pair() {
-    if (!is_system_ready()) {
-        throw std::runtime_error("System is not ready for operation");
-    }
+    // Генерация приватного ключа
+    private_key = SecureRandom::generate_csidh_key(security_level_, params);
     
-    start_time = std::chrono::high_resolution_clock::now();
+    // Начальная кривая
+    MontgomeryCurve current_curve = base_curve;
     
-    // Проверка целостности системы перед выполнением
-    if (!code_integrity.system_integrity_check()) {
-        if (!code_integrity.self_recovery()) {
-            throw std::runtime_error("System integrity check failed and recovery unsuccessful");
-        }
-    }
-    
-    // Очистка предыдущего ключа
-    SecureRandom::secure_clean_memory(private_key.data(), private_key.size() * sizeof(short));
-    private_key.clear();
-    
-    // Генерация случайного ключа с ограничением "малости"
-    private_key.resize(params.num_primes);
-    int weight = 0;
-    
-    // Определяем максимальный вес ключа в зависимости от уровня безопасности
-    int max_weight = SecurityConstants::get_max_l1(security_level);
-    int max_abs = SecurityConstants::get_max_linf(security_level);
-    
-    // Гарантируем, что ключ будет "малым" (small)
-    while (weight == 0 || weight > max_weight) {
-        weight = 0;
-        for (size_t i = 0; i < private_key.size(); i++) {
-            // Генерация экспоненты в диапазоне [-max_abs, max_abs]
-            int exponent = rfc6979_rng->generate_random_exponent(max_abs);
-            private_key[i] = static_cast<short>(exponent);
+    // Применение изогений в соответствии с приватным ключом
+    for (size_t i = 0; i < params.primes.size(); i++) {
+        int exponent = private_key[i];
+        
+        if (exponent != 0) {
+            unsigned int order = static_cast<unsigned int>(mpz_get_ui(params.primes[i].get_mpz_t()));
+            EllipticCurvePoint kernel_point = current_curve.find_point_of_order(order);
             
-            if (exponent != 0) {
-                weight += std::abs(exponent);
+            // Применение изогении |exponent| раз
+            for (int j = 0; j < std::abs(exponent); j++) {
+                current_curve = current_curve.compute_isogeny(kernel_point, order);
+                
+                // Для отрицательных экспонент используем обратную изогению
+                if (exponent < 0) {
+                    kernel_point = kernel_point.scalar_multiply(GmpRaii(order - 1), current_curve);
+                }
             }
         }
     }
     
-    // Вычисление публичной кривой
-    public_curve = base_curve;
-    for (size_t i = 0; i < private_key.size(); i++) {
-        if (private_key[i] != 0) {
-            unsigned int prime_degree = static_cast<unsigned int>(params.primes[i].get_ui());
-            EllipticCurvePoint kernel_point = public_curve.find_point_of_order(prime_degree, *rfc6979_rng);
-            if (!kernel_point.is_infinity()) {
-                public_curve = compute_isogeny(public_curve, kernel_point, prime_degree);
-            }
-        }
-    }
+    // Установка публичной кривой
+    public_curve = current_curve;
     
-    // Проверка, что ключ действительно мал
-    if (!is_small_key(convert_to_gmp_key(private_key))) {
-        throw std::runtime_error("Generated key is not small");
-    }
-    
-    // Проверка, что ключ безопасен
-    if (!is_secure_key()) {
-        throw std::runtime_error("Generated key is weak");
-    }
+    SecureAuditLogger::get_instance().log_event("key", "Key pair generated successfully", false);
 }
 
 std::vector<unsigned char> TorusCSIDH::sign(const std::vector<unsigned char>& message) {
-    if (!is_system_ready()) {
-        throw std::runtime_error("System is not ready for operation");
+    // Проверка целостности системы перед подписью
+    if (!code_integrity.system_integrity_check()) {
+        throw std::runtime_error("System integrity check failed before signing");
     }
     
+    // Начало отсчета времени для обеспечения постоянного времени
     start_time = std::chrono::high_resolution_clock::now();
     
-    // Проверка целостности системы перед выполнением
-    if (!code_integrity.system_integrity_check()) {
-        if (!code_integrity.self_recovery()) {
-            throw std::runtime_error("System integrity check failed and recovery unsuccessful");
-        }
-    }
-    
-    // Хеширование сообщения с использованием BLAKE3
-    std::vector<unsigned char> message_hash = PostQuantumHash::blake3(message);
-    
-    // Генерация эфемерного ключа с использованием RFC 6979
-    GmpRaii k = rfc6979_rng->generate_k(message_hash);
+    // Генерация эфемерного ключа
+    std::vector<short> ephemeral_key = SecureRandom::generate_ephemeral_key(security_level_, params);
     
     // Вычисление эфемерной кривой
-    MontgomeryCurve eph_curve = base_curve;
+    MontgomeryCurve ephemeral_curve = base_curve;
     for (size_t i = 0; i < params.primes.size(); i++) {
-        if (mpz_tstbit(k.get_mpz_t(), i)) {
-            unsigned int prime_degree = static_cast<unsigned int>(params.primes[i].get_ui());
-            EllipticCurvePoint kernel_point = eph_curve.find_point_of_order(prime_degree, *rfc6979_rng);
-            if (!kernel_point.is_infinity()) {
-                eph_curve = compute_isogeny(eph_curve, kernel_point, prime_degree);
+        int exponent = ephemeral_key[i];
+        
+        if (exponent != 0) {
+            unsigned int order = static_cast<unsigned int>(mpz_get_ui(params.primes[i].get_mpz_t()));
+            EllipticCurvePoint kernel_point = ephemeral_curve.find_point_of_order(order);
+            
+            // Применение изогении |exponent| раз
+            for (int j = 0; j < std::abs(exponent); j++) {
+                ephemeral_curve = ephemeral_curve.compute_isogeny(kernel_point, order);
+                
+                // Для отрицательных экспонент используем обратную изогению
+                if (exponent < 0) {
+                    kernel_point = kernel_point.scalar_multiply(GmpRaii(order - 1), ephemeral_curve);
+                }
             }
         }
     }
     
-    // Вычисление j-инварианта эфемерной кривой
-    GmpRaii j_invariant = eph_curve.compute_j_invariant();
-    
-    // Проверка геометрических свойств эфемерной кривой
-    IsogenyGraph subgraph = geometric_validator.build_isogeny_subgraph(eph_curve, SecurityConstants::GEOMETRIC_RADIUS);
-    double cyclomatic_score, spectral_gap_score, clustering_score, degree_entropy_score, distance_entropy_score;
-    
-    if (!geometric_validator.validate_curve(eph_curve, subgraph, 
-                                          cyclomatic_score, spectral_gap_score, 
-                                          clustering_score, degree_entropy_score, 
-                                          distance_entropy_score)) {
+    // Геометрическая проверка эфемерной кривой
+    if (!validate_geometric_properties(ephemeral_curve)) {
         throw std::runtime_error("Ephemeral curve failed geometric validation");
     }
     
-    // Вычисление подписи (r, s)
-    std::vector<unsigned char> r(j_invariant.get_str().begin(), j_invariant.get_str().end());
-    r.resize(32, 0); // Убедимся, что r имеет длину 32 байта
+    // Вычисление общего секрета: [d_A]E_eph
+    MontgomeryCurve shared_secret_curve = ephemeral_curve;
+    for (size_t i = 0; i < params.primes.size(); i++) {
+        int exponent = private_key[i];
+        
+        if (exponent != 0) {
+            unsigned int order = static_cast<unsigned int>(mpz_get_ui(params.primes[i].get_mpz_t()));
+            EllipticCurvePoint kernel_point = shared_secret_curve.find_point_of_order(order);
+            
+            // Применение изогении |exponent| раз
+            for (int j = 0; j < std::abs(exponent); j++) {
+                shared_secret_curve = shared_secret_curve.compute_isogeny(kernel_point, order);
+                
+                // Для отрицательных экспонент используем обратную изогению
+                if (exponent < 0) {
+                    kernel_point = kernel_point.scalar_multiply(GmpRaii(order - 1), shared_secret_curve);
+                }
+            }
+        }
+    }
     
-    // Вычисление s
-    GmpRaii h = PostQuantumHash::hash_to_gmp(message_hash, base_curve.get_p());
-    GmpRaii s = (k - h * convert_to_gmp_key(private_key)) % base_curve.get_p();
+    // Вычисление j-инварианта общего секрета
+    GmpRaii j_invariant = shared_secret_curve.compute_j_invariant();
     
-    // Формирование подписи
-    std::vector<unsigned char> signature;
-    signature.insert(signature.end(), r.begin(), r.end());
+    // Хеширование сообщения и j-инварианта
+    std::vector<unsigned char> message_hash = PostQuantumHash::hash(message);
+    std::vector<unsigned char> j_bytes;
+    mpz_export(j_bytes.data(), nullptr, 1, 1, 1, 0, j_invariant.get_mpz_t());
     
-    std::vector<unsigned char> s_bytes(32);
-    mpz_export(s_bytes.data(), nullptr, 1, 1, 1, 0, s.get_mpz_t());
-    signature.insert(signature.end(), s_bytes.begin(), s_bytes.end());
+    // Добавляем j-инвариант к хешу сообщения
+    message_hash.insert(message_hash.end(), j_bytes.begin(), j_bytes.end());
+    
+    // Хеширование для получения финальной подписи
+    std::vector<unsigned char> signature = PostQuantumHash::hash(message_hash);
+    
+    // Добавляем эфемерную кривую к подписи
+    std::vector<unsigned char> ephemeral_curve_bytes;
+    mpz_export(ephemeral_curve_bytes.data(), nullptr, 1, 1, 1, 0, ephemeral_curve.compute_j_invariant().get_mpz_t());
+    
+    signature.insert(signature.end(), ephemeral_curve_bytes.begin(), ephemeral_curve_bytes.end());
     
     // Обеспечение постоянного времени выполнения
-    ensure_constant_time(std::chrono::microseconds(1000));
+    ensure_constant_time(std::chrono::microseconds(SecurityConstants::SIGNING_TIME));
+    
+    SecureAuditLogger::get_instance().log_event("signature", "Message signed successfully", false);
     
     return signature;
 }
 
 bool TorusCSIDH::verify(const std::vector<unsigned char>& message, const std::vector<unsigned char>& signature) {
-    if (!is_system_ready()) {
-        throw std::runtime_error("System is not ready for operation");
+    // Проверка целостности системы перед верификацией
+    if (!code_integrity.system_integrity_check()) {
+        SecureAuditLogger::get_instance().log_event("security", "System integrity check failed during verification", true);
+        return false;
     }
     
+    // Начало отсчета времени для обеспечения постоянного времени
     start_time = std::chrono::high_resolution_clock::now();
     
     // Проверка размера подписи
-    if (signature.size() < 64) {
+    if (signature.size() < SecurityConstants::MIN_SIGNATURE_SIZE) {
+        SecureAuditLogger::get_instance().log_event("security", "Invalid signature size", true);
         return false;
     }
     
-    // Проверка целостности системы перед выполнением
-    if (!code_integrity.system_integrity_check()) {
-        if (!code_integrity.self_recovery()) {
-            throw std::runtime_error("System integrity check failed and recovery unsuccessful");
-        }
-    }
-    
-    // Хеширование сообщения с использованием BLAKE3
-    std::vector<unsigned char> message_hash = PostQuantumHash::blake3(message);
-    
-    // Извлечение r и s из подписи
-    std::vector<unsigned char> r(signature.begin(), signature.begin() + 32);
-    std::vector<unsigned char> s(signature.begin() + 32, signature.end());
+    // Извлечение хеша подписи и эфемерной кривой
+    size_t hash_size = SecurityConstants::HASH_SIZE;
+    std::vector<unsigned char> signature_hash(signature.begin(), signature.begin() + hash_size);
+    std::vector<unsigned char> ephemeral_curve_bytes(signature.begin() + hash_size, signature.end());
     
     // Восстановление j-инварианта эфемерной кривой
-    GmpRaii j_invariant;
-    mpz_import(j_invariant.get_mpz_t(), 32, 1, 1, 1, 0, r.data());
+    GmpRaii ephemeral_j;
+    mpz_import(ephemeral_j.get_mpz_t(), ephemeral_curve_bytes.size(), 1, 1, 1, 0, ephemeral_curve_bytes.data());
     
-    // Создание эфемерной кривой из j-инварианта
-    MontgomeryCurve eph_curve = MontgomeryCurve::from_j_invariant(j_invariant, base_curve.get_p());
+    // Создание эфемерной кривой
+    MontgomeryCurve ephemeral_curve = base_curve;
     
-    // Проверка геометрических свойств эфемерной кривой
-    IsogenyGraph subgraph = geometric_validator.build_isogeny_subgraph(eph_curve, SecurityConstants::GEOMETRIC_RADIUS);
-    double cyclomatic_score, spectral_gap_score, clustering_score, degree_entropy_score, distance_entropy_score;
-    
-    if (!geometric_validator.validate_curve(eph_curve, subgraph, 
-                                          cyclomatic_score, spectral_gap_score, 
-                                          clustering_score, degree_entropy_score, 
-                                          distance_entropy_score)) {
+    // Геометрическая проверка эфемерной кривой
+    if (!validate_geometric_properties(ephemeral_curve)) {
+        SecureAuditLogger::get_instance().log_event("security", "Ephemeral curve failed geometric validation during verification", true);
         return false;
     }
     
-    // Вычисление h = H(m)
-    GmpRaii h = PostQuantumHash::hash_to_gmp(message_hash, base_curve.get_p());
-    
-    // Вычисление [h]Y + [s]E
-    MontgomeryCurve curve1 = public_curve;
+    // Вычисление общего секрета: [d_B]E_eph
+    MontgomeryCurve shared_secret_curve = ephemeral_curve;
     for (size_t i = 0; i < params.primes.size(); i++) {
-        if (mpz_tstbit(h.get_mpz_t(), i)) {
-            unsigned int prime_degree = static_cast<unsigned int>(params.primes[i].get_ui());
-            EllipticCurvePoint kernel_point = curve1.find_point_of_order(prime_degree, *rfc6979_rng);
-            if (!kernel_point.is_infinity()) {
-                curve1 = compute_isogeny(curve1, kernel_point, prime_degree);
+        int exponent = private_key[i];
+        
+        if (exponent != 0) {
+            unsigned int order = static_cast<unsigned int>(mpz_get_ui(params.primes[i].get_mpz_t()));
+            EllipticCurvePoint kernel_point = shared_secret_curve.find_point_of_order(order);
+            
+            // Применение изогении |exponent| раз
+            for (int j = 0; j < std::abs(exponent); j++) {
+                shared_secret_curve = shared_secret_curve.compute_isogeny(kernel_point, order);
+                
+                // Для отрицательных экспонент используем обратную изогению
+                if (exponent < 0) {
+                    kernel_point = kernel_point.scalar_multiply(GmpRaii(order - 1), shared_secret_curve);
+                }
             }
         }
     }
     
-    MontgomeryCurve curve2 = eph_curve;
-    for (size_t i = 0; i < params.primes.size(); i++) {
-        if (mpz_tstbit(s.get_mpz_t(), i)) {
-            unsigned int prime_degree = static_cast<unsigned int>(params.primes[i].get_ui());
-            EllipticCurvePoint kernel_point = curve2.find_point_of_order(prime_degree, *rfc6979_rng);
-            if (!kernel_point.is_infinity()) {
-                curve2 = compute_isogeny(curve2, kernel_point, prime_degree);
-            }
-        }
-    }
+    // Вычисление j-инварианта общего секрета
+    GmpRaii j_invariant = shared_secret_curve.compute_j_invariant();
     
-    // Проверяем, что результаты одинаковы (коммутативность)
-    if (curve1.compute_j_invariant() != curve2.compute_j_invariant()) {
-        return false;
+    // Хеширование сообщения и j-инварианта
+    std::vector<unsigned char> message_hash = PostQuantumHash::hash(message);
+    std::vector<unsigned char> j_bytes;
+    mpz_export(j_bytes.data(), nullptr, 1, 1, 1, 0, j_invariant.get_mpz_t());
+    
+    // Добавляем j-инвариант к хешу сообщения
+    message_hash.insert(message_hash.end(), j_bytes.begin(), j_bytes.end());
+    
+    // Хеширование для получения финальной подписи
+    std::vector<unsigned char> computed_signature = PostQuantumHash::hash(message_hash);
+    
+    // Постоянное время сравнение
+    bool signature_valid = true;
+    for (size_t i = 0; i < hash_size; i++) {
+        signature_valid &= (signature_hash[i] == computed_signature[i]);
     }
     
     // Обеспечение постоянного времени выполнения
-    ensure_constant_time(std::chrono::microseconds(1000));
+    ensure_constant_time(std::chrono::microseconds(SecurityConstants::VERIFICATION_TIME));
     
-    return true;
+    if (signature_valid) {
+        SecureAuditLogger::get_instance().log_event("signature", "Signature verified successfully", false);
+    } else {
+        SecureAuditLogger::get_instance().log_event("security", "Signature verification failed", true);
+    }
+    
+    return signature_valid;
 }
 
 std::string TorusCSIDH::generate_address() {
-    // Генерация адреса в формате Bech32m
+    // Получение j-инварианта публичной кривой
     GmpRaii j_invariant = public_curve.compute_j_invariant();
-    std::string j_str = j_invariant.get_str();
     
-    // Преобразование j-инварианта в хеш с использованием BLAKE3
-    std::vector<unsigned char> hash = PostQuantumHash::blake3(
-        std::vector<unsigned char>(j_str.begin(), j_str.end()));
+    // Конвертация j-инварианта в байты
+    std::vector<unsigned char> j_bytes;
+    size_t count;
+    mpz_export(nullptr, &count, 1, 1, 1, 0, j_invariant.get_mpz_t());
+    j_bytes.resize(count);
+    mpz_export(j_bytes.data(), nullptr, 1, 1, 1, 0, j_invariant.get_mpz_t());
     
-    // Кодирование в Bech32m
-    std::vector<uint8_t> values;
-    
-    // Добавляем хеш как 5-битные значения
-    for (int i = 0; i < hash.size(); i++) {
-        values.push_back((hash[i] >> 3) & 0x1f);
-        values.push_back((hash[i] & 0x07) << 2);
-    }
-    
-    // Удаляем последний неполный байт
-    values.pop_back();
-    
-    // Добавляем контрольную сумму
-    std::vector<uint8_t> checksum = bech32m_create_checksum("tcidh", values);
-    values.insert(values.end(), checksum.begin(), checksum.end());
-    
-    // Кодируем в Bech32m
-    return bech32m_encode("tcidh", values);
+    // Генерация адреса в формате Bech32m
+    return Bech32m::encode("tcidh", j_bytes);
 }
 
 void TorusCSIDH::print_info() const {
-    std::cout << "=== Информация о системе TorusCSIDH ===" << std::endl;
-    std::cout << "Уровень безопасности: ";
-    switch (security_level) {
-        case SecurityConstants::SecurityLevel::LEVEL_128: std::cout << "128 бит"; break;
-        case SecurityConstants::SecurityLevel::LEVEL_192: std::cout << "192 бит"; break;
-        case SecurityConstants::SecurityLevel::LEVEL_256: std::cout << "256 бит"; break;
-    }
-    std::cout << std::endl;
+    std::cout << "TorusCSIDH System Information:" << std::endl;
+    std::cout << "  Security Level: " << static_cast<int>(security_level_) << " bits" << std::endl;
+    std::cout << "  Base Curve: j-invariant = " << base_curve.compute_j_invariant() << std::endl;
+    std::cout << "  Public Curve: j-invariant = " << public_curve.compute_j_invariant() << std::endl;
+    std::cout << "  Prime Count: " << params.primes.size() << std::endl;
+    std::cout << "  Max Linf: " << SecurityConstants::get_max_linf(security_level_) << std::endl;
+    std::cout << "  Max L1: " << SecurityConstants::get_max_l1(security_level_) << std::endl;
+    std::cout << "  Geometric Radius: " << GEOMETRIC_RADIUS << std::endl;
     
-    std::cout << "Количество простых чисел: " << params.num_primes << std::endl;
-    std::cout << "Максимальная L∞ норма: " << SecurityConstants::get_max_linf(security_level) << std::endl;
-    std::cout << "Максимальная L1 норма: " << SecurityConstants::get_max_l1(security_level) << std::endl;
-    std::cout << "Поле: p = " << base_curve.get_p().get_str() << std::endl;
-    std::cout << "Базовая кривая: y^2 = x^3 + " << base_curve.get_A().get_str() << "x^2 + x" << std::endl;
-    std::cout << "Публичная кривая: y^2 = x^3 + " << public_curve.get_A().get_str() << "x^2 + x" << std::endl;
-    std::cout << "Приватный ключ: [";
-    for (size_t i = 0; i < private_key.size(); i++) {
-        if (i > 0) std::cout << ", ";
-        std::cout << static_cast<int>(private_key[i]);
+    // Проверка ключа
+    std::cout << "  Key Status: " << (is_secure_key() ? "SECURE" : "INSECURE") << std::endl;
+    if (!is_small_key()) {
+        std::cout << "    - Key is not small" << std::endl;
     }
-    std::cout << "]" << std::endl;
+    if (is_weak_key()) {
+        std::cout << "    - Key has weak patterns" << std::endl;
+    }
+    if (is_vulnerable_to_long_path_attack()) {
+        std::cout << "    - Key is vulnerable to long path attack" << std::endl;
+    }
+    if (is_vulnerable_to_degenerate_topology_attack()) {
+        std::cout << "    - Key is vulnerable to degenerate topology attack" << std::endl;
+    }
 }
 
 bool TorusCSIDH::is_system_ready() const {
-    return initialized && !code_integrity.is_blocked_due_to_anomalies();
+    return code_integrity.is_system_ready() && is_secure_key();
 }
 
 const MontgomeryCurve& TorusCSIDH::get_public_curve() const {
@@ -356,78 +311,93 @@ const std::vector<short>& TorusCSIDH::get_private_key() const {
     return private_key;
 }
 
-const CSIDHParameters& TorusCSIDH::get_params() const {
-    return params;
-}
-
-Rfc6979Rng* TorusCSIDH::get_rfc6979_rng() const {
-    return rfc6979_rng;
-}
-
-CodeIntegrityProtection& TorusCSIDH::get_code_integrity() {
+const CodeIntegrityProtection& TorusCSIDH::get_code_integrity() const {
     return code_integrity;
 }
 
-const std::vector<GmpRaii>& TorusCSIDH::get_primes() const {
-    return params.primes;
+const GeometricValidator& TorusCSIDH::get_geometric_validator() const {
+    return geometric_validator;
 }
 
-bool TorusCSIDH::is_small_key(const GmpRaii& key) const {
+bool TorusCSIDH::is_small_key() const {
     // Проверка нормы L∞ (максимальное значение коэффициентов)
     int max_abs = 0;
-    for (size_t i = 0; i < private_key.size(); i++) {
-        if (mpz_tstbit(key.get_mpz_t(), i)) {
-            // В оригинальном CSIDH ключи представляют собой вектор целых чисел
-            // Нужно учитывать знак и величину
-            int value = private_key[i];
-            if (std::abs(value) > max_abs) {
-                max_abs = std::abs(value);
-            }
+    for (const auto& val : private_key) {
+        if (std::abs(val) > max_abs) {
+            max_abs = std::abs(val);
         }
     }
     
     // Проверка нормы L1 (сумма абсолютных значений)
     int sum_abs = 0;
-    for (size_t i = 0; i < private_key.size(); i++) {
-        if (mpz_tstbit(key.get_mpz_t(), i)) {
-            sum_abs += std::abs(private_key[i]);
-        }
+    for (const auto& val : private_key) {
+        sum_abs += std::abs(val);
     }
     
     // Проверяем оба критерия в зависимости от уровня безопасности
-    int max_Linf = SecurityConstants::get_max_linf(security_level);
-    int max_L1 = SecurityConstants::get_max_l1(security_level);
+    int max_Linf = SecurityConstants::get_max_linf(security_level_);
+    int max_L1 = SecurityConstants::get_max_l1(security_level_);
     
     return (max_abs <= max_Linf) && (sum_abs <= max_L1);
 }
 
 bool TorusCSIDH::is_weak_key() const {
-    // Проверка на наличие известных слабых ключей
-    // Основано на исследованиях последних атак на CSIDH
+    // Проверка на наличие регулярных паттернов в ключе
+    // Основано на исследованиях атак через вырожденную топологию
+    const size_t min_pattern_length = SecurityConstants::MIN_KEY_PATTERN_LEN;
     
-    // Проверка на маленькие ключи (могут быть уязвимы к атакам)
-    int small_key_count = 0;
-    for (const auto& val : private_key) {
-        if (std::abs(val) < 3) {
-            small_key_count++;
-        }
-    }
-    
-    // Если слишком много маленьких значений, ключ может быть уязвим
-    if (static_cast<double>(small_key_count) / private_key.size() > SecurityConstants::WEAK_KEY_THRESHOLD) {
-        return true;
-    }
-    
-    // Проверка на регулярные шаблоны
-    for (size_t i = 0; i < private_key.size() - SecurityConstants::MIN_KEY_PATTERN_LEN + 1; i++) {
-        bool pattern_found = true;
-        for (size_t j = 1; j < SecurityConstants::MIN_KEY_PATTERN_LEN; j++) {
+    // Проверка на постоянные последовательности
+    for (size_t i = 0; i < private_key.size() - min_pattern_length + 1; i++) {
+        bool is_constant = true;
+        for (size_t j = 1; j < min_pattern_length; j++) {
             if (private_key[i] != private_key[i + j]) {
-                pattern_found = false;
+                is_constant = false;
                 break;
             }
         }
-        if (pattern_found) {
+        if (is_constant) {
+            return true;
+        }
+    }
+    
+    // Проверка на арифметические прогрессии
+    for (size_t i = 0; i < private_key.size() - min_pattern_length + 1; i++) {
+        if (private_key.size() - i < min_pattern_length) break;
+        
+        int diff = private_key[i + 1] - private_key[i];
+        bool is_arithmetic = true;
+        for (size_t j = 2; j < min_pattern_length; j++) {
+            if (private_key[i + j] - private_key[i + j - 1] != diff) {
+                is_arithmetic = false;
+                break;
+            }
+        }
+        if (is_arithmetic) {
+            return true;
+        }
+    }
+    
+    // Проверка на геометрические прогрессии
+    for (size_t i = 0; i < private_key.size() - min_pattern_length + 1; i++) {
+        if (private_key.size() - i < min_pattern_length) break;
+        
+        if (private_key[i] == 0 || private_key[i + 1] == 0) continue;
+        
+        double ratio = static_cast<double>(private_key[i + 1]) / private_key[i];
+        bool is_geometric = true;
+        for (size_t j = 2; j < min_pattern_length; j++) {
+            if (private_key[i + j - 1] == 0) {
+                is_geometric = false;
+                break;
+            }
+            
+            double current_ratio = static_cast<double>(private_key[i + j]) / private_key[i + j - 1];
+            if (std::abs(current_ratio - ratio) > 0.001) {
+                is_geometric = false;
+                break;
+            }
+        }
+        if (is_geometric) {
             return true;
         }
     }
@@ -437,7 +407,81 @@ bool TorusCSIDH::is_weak_key() const {
 
 bool TorusCSIDH::is_secure_key() const {
     // Проверка, что ключ соответствует всем критериям безопасности
-    return is_small_key(convert_to_gmp_key(private_key)) && !is_weak_key();
+    return is_small_key() && 
+           !is_weak_key() && 
+           !is_vulnerable_to_long_path_attack() && 
+           !is_vulnerable_to_degenerate_topology_attack();
+}
+
+bool TorusCSIDH::is_vulnerable_to_long_path_attack() const {
+    // Проверка уязвимости к атаке через длинный путь
+    // В атаке через длинный путь злоумышленник использует кривые,
+    // где последовательность изогений одного типа слишком длинная
+    
+    int max_consecutive_same_sign = 0;
+    int current_consecutive = 0;
+    int last_sign = 0;
+    
+    for (const auto& val : private_key) {
+        int sign = (val > 0) ? 1 : (val < 0) ? -1 : 0;
+        
+        if (sign == last_sign && sign != 0) {
+            current_consecutive++;
+        } else {
+            max_consecutive_same_sign = std::max(max_consecutive_same_sign, current_consecutive);
+            current_consecutive = (sign != 0) ? 1 : 0;
+            last_sign = sign;
+        }
+    }
+    
+    max_consecutive_same_sign = std::max(max_consecutive_same_sign, current_consecutive);
+    
+    // Порог для уязвимости зависит от уровня безопасности
+    int vulnerability_threshold;
+    switch (security_level_) {
+        case SecurityConstants::SecurityLevel::LEVEL_128:
+            vulnerability_threshold = SecurityConstants::MAX_CONSECUTIVE_128;
+            break;
+        case SecurityConstants::SecurityLevel::LEVEL_192:
+            vulnerability_threshold = SecurityConstants::MAX_CONSECUTIVE_192;
+            break;
+        case SecurityConstants::SecurityLevel::LEVEL_256:
+            vulnerability_threshold = SecurityConstants::MAX_CONSECUTIVE_256;
+            break;
+        default:
+            vulnerability_threshold = SecurityConstants::MAX_CONSECUTIVE_128;
+    }
+    
+    return max_consecutive_same_sign > vulnerability_threshold;
+}
+
+bool TorusCSIDH::is_vulnerable_to_degenerate_topology_attack() const {
+    // Проверка уязвимости к атаке через вырожденную топологию
+    // Такая атака использует кривые с неестественной структурой графа изогений
+    
+    // Создаем кривую из ключа
+    MontgomeryCurve test_curve = base_curve;
+    for (size_t i = 0; i < params.primes.size(); i++) {
+        int exponent = private_key[i];
+        
+        if (exponent != 0) {
+            unsigned int order = static_cast<unsigned int>(mpz_get_ui(params.primes[i].get_mpz_t()));
+            EllipticCurvePoint kernel_point = test_curve.find_point_of_order(order);
+            
+            // Применение изогении |exponent| раз
+            for (int j = 0; j < std::abs(exponent); j++) {
+                test_curve = test_curve.compute_isogeny(kernel_point, order);
+                
+                // Для отрицательных экспонент используем обратную изогению
+                if (exponent < 0) {
+                    kernel_point = kernel_point.scalar_multiply(GmpRaii(order - 1), test_curve);
+                }
+            }
+        }
+    }
+    
+    // Проверяем геометрические свойства полученной кривой
+    return !validate_geometric_properties(test_curve);
 }
 
 void TorusCSIDH::ensure_constant_time(const std::chrono::microseconds& target_time) {
@@ -445,64 +489,144 @@ void TorusCSIDH::ensure_constant_time(const std::chrono::microseconds& target_ti
     
     // Используем более надежный метод для обеспечения постоянного времени
     if (elapsed < target_time) {
-        // Вместо простой задержки используем вычисления, которые зависят от времени
         auto remaining = target_time - std::chrono::duration_cast<std::chrono::microseconds>(elapsed);
         
-        // Выполняем вычисления, которые занимают фиксированное время
-        // Используем криптографически безопасные операции
-        GmpRaii dummy(1);
-        auto start = std::chrono::high_resolution_clock::now();
+        // Добавляем небольшую случайную задержку для защиты от анализа времени
+        auto jitter = std::chrono::microseconds(SecureRandom::generate_random_mpz(GmpRaii(50)).get_ui());
+        auto adjusted_remaining = remaining + jitter;
         
-        size_t ops = 0;
-        while (std::chrono::high_resolution_clock::now() - start < remaining && ops < SecurityConstants::MIN_CONSTANT_TIME_OPS) {
-            // Выполняем операции, которые не зависят от секретных данных
-            dummy = dummy * dummy + GmpRaii(3);
-            dummy %= base_curve.get_p();
-            
-            // Добавляем дополнительные проверки для предотвращения оптимизации компилятором
-            volatile int check = mpz_probab_prime_p(dummy.get_mpz_t(), 5);
-            (void)check;
-            
-            ops++;
+        // Требуемое количество итераций для задержки
+        const size_t iterations = adjusted_remaining.count() * 100;
+        
+        // Используем сложный вычислительный цикл для задержки
+        volatile uint64_t dummy = 0;
+        for (size_t i = 0; i < iterations; i++) {
+            dummy += i * (i ^ 0x55AA) + dummy % 1000;
+            dummy = (dummy >> 31) | (dummy << 1);
         }
+    }
+}
+
+bool TorusCSIDH::is_curve_in_isogeny_graph(const MontgomeryCurve& curve) const {
+    // Проверка, что кривая действительно принадлежит графу изогений
+    // 1. Проверка, что j-инварианты связаны модулярными уравнениями для данного набора простых чисел
+    GmpRaii base_j = base_curve.compute_j_invariant();
+    GmpRaii curve_j = curve.compute_j_invariant();
+    GmpRaii p = base_curve.get_p();
+    
+    // 2. Проверка, что кривые имеют одинаковый порядок
+    GmpRaii base_order = base_curve.compute_order();
+    GmpRaii curve_order = curve.compute_order();
+    if (base_order != curve_order) {
+        return false;
+    }
+    
+    // 3. Проверка, что кривые суперсингулярны
+    if (!base_curve.is_supersingular() || !curve.is_supersingular()) {
+        return false;
+    }
+    
+    // 4. Проверка модулярных уравнений для всех простых в наборе
+    bool connected = false;
+    for (const auto& prime : params.primes) {
+        unsigned long degree = mpz_get_ui(prime.get_mpz_t());
         
-        // Дополнительная очистка памяти
-        secure_clean_memory(dummy.get_mpz_t(), sizeof(mpz_t));
+        // Проверяем, связаны ли кривые изогенией этой степени
+        if (geometric_validator.verify_modular_connection(base_curve, curve, prime)) {
+            connected = true;
+            break;
+        }
     }
+    
+    return connected;
 }
 
-MontgomeryCurve TorusCSIDH::compute_isogeny(const MontgomeryCurve& curve, 
-                                           const EllipticCurvePoint& kernel_point, 
-                                           unsigned int degree) const {
-    if (kernel_point.is_infinity() || !kernel_point.is_on_curve(curve)) {
-        return curve; // Нет изогении
-    }
+bool TorusCSIDH::validate_geometric_properties(const MontgomeryCurve& curve) const {
+    // Вычисляем подграф изогений радиуса GEOMETRIC_RADIUS вокруг кривой
+    GeometricValidator::Graph subgraph = build_isogeny_graph(curve, GEOMETRIC_RADIUS);
     
-    // В зависимости от степени используем соответствующую реализацию
-    if (degree == 7) {
-        return compute_isogeny_degree_7(curve, kernel_point);
-    }
+    // Проверка всех семи геометрических критериев
+    double cyclomatic_score, spectral_gap_score, clustering_score, degree_entropy_score, distance_score;
     
-    // Для других степеней используем общий алгоритм
-    // ...
+    bool cyclomatic_valid = geometric_validator.check_cyclomatic_number(curve, params.primes, GEOMETRIC_RADIUS);
+    bool spectral_valid = geometric_validator.check_spectral_gap(curve, params.primes, GEOMETRIC_RADIUS);
+    bool connectivity_valid = geometric_validator.check_local_connectivity(curve, params.primes, GEOMETRIC_RADIUS);
+    bool long_paths_valid = geometric_validator.check_long_paths(curve, params.primes, GEOMETRIC_RADIUS + 1);
+    bool degenerate_valid = geometric_validator.check_degenerate_topology(curve, params.primes, GEOMETRIC_RADIUS);
+    bool symmetry_valid = geometric_validator.check_graph_symmetry(curve, params.primes, GEOMETRIC_RADIUS);
+    bool metric_valid = geometric_validator.check_metric_consistency(curve, params.primes, GEOMETRIC_RADIUS + 1);
     
-    return curve;
+    // Вычисляем общий балл безопасности
+    double total_score = 0.20 * (cyclomatic_valid ? 1.0 : 0.0) + 
+                         0.20 * (spectral_valid ? 1.0 : 0.0) + 
+                         0.15 * (connectivity_valid ? 1.0 : 0.0) + 
+                         0.10 * (long_paths_valid ? 1.0 : 0.0) + 
+                         0.10 * (degenerate_valid ? 1.0 : 0.0) + 
+                         0.15 * (symmetry_valid ? 1.0 : 0.0) + 
+                         0.10 * (metric_valid ? 1.0 : 0.0);
+    
+    // Проверка, что кривая действительно принадлежит графу изогений
+    bool in_isogeny_graph = is_curve_in_isogeny_graph(curve);
+    
+    // Логирование результатов для диагностики
+    std::cout << "Геометрическая проверка: " 
+              << (total_score >= 0.85 && in_isogeny_graph ? "УСПЕШНА" : "НЕУДАЧНА") << std::endl;
+    std::cout << "  Цикломатическое число: " << (cyclomatic_valid ? "OK" : "FAIL") << std::endl;
+    std::cout << "  Спектральный зазор: " << (spectral_valid ? "OK" : "FAIL") << std::endl;
+    std::cout << "  Локальная связность: " << (connectivity_valid ? "OK" : "FAIL") << std::endl;
+    std::cout << "  Длинные пути: " << (long_paths_valid ? "OK" : "FAIL") << std::endl;
+    std::cout << "  Вырожденная топология: " << (degenerate_valid ? "OK" : "FAIL") << std::endl;
+    std::cout << "  Симметрия графа: " << (symmetry_valid ? "OK" : "FAIL") << std::endl;
+    std::cout << "  Метрическая согласованность: " << (metric_valid ? "OK" : "FAIL") << std::endl;
+    std::cout << "  Принадлежность графу изогений: " << (in_isogeny_graph ? "OK" : "FAIL") << std::endl;
+    std::cout << "  Общий балл: " << total_score * 100.0 << "%" << std::endl;
+    
+    return (total_score >= 0.85) && in_isogeny_graph;
 }
 
-MontgomeryCurve TorusCSIDH::compute_isogeny_degree_7(const MontgomeryCurve& curve,
-                                                   const EllipticCurvePoint& kernel_point) const {
-    if (kernel_point.is_infinity() || !kernel_point.is_on_curve(curve)) {
-        return curve;
-    }
-    
-    // Реализация формулы Велю для изогении степени 7
-    // ...
-    
-    return curve;
+const SecurityConstants::CSIDHParams& TorusCSIDH::get_security_params() const {
+    return params;
 }
 
-GmpRaii TorusCSIDH::convert_to_gmp_key(const std::vector<short>& private_key) const {
-    GmpRaii key(0);
+const std::vector<GmpRaii>& TorusCSIDH::get_primes() const {
+    return params.primes;
+}
+
+void TorusCSIDH::initialize_security_params() {
+    // Инициализация параметров безопасности в зависимости от уровня
+    params = SecurityConstants::get_csidh_params(security_level_);
+}
+
+bool TorusCSIDH::validate_base_parameters() const {
+    // Проверка, что базовая кривая суперсингулярна
+    if (!base_curve.is_supersingular()) {
+        return false;
+    }
+    
+    // Проверка, что базовая кривая имеет правильную структуру для TorusCSIDH
+    if (!base_curve.has_valid_torus_structure()) {
+        return false;
+    }
+    
+    // Проверка, что простые числа подходят для CSIDH
+    for (const auto& prime : params.primes) {
+        unsigned long p_val = mpz_get_ui(prime.get_mpz_t());
+        if (p_val < 3 || p_val > 100) {
+            return false; // Простые числа должны быть в разумном диапазоне
+        }
+    }
+    
+    return true;
+}
+
+GeometricValidator::Graph TorusCSIDH::build_isogeny_graph(const MontgomeryCurve& center_curve, int radius) const {
+    return geometric_validator.build_local_isogeny_graph(center_curve, params.primes, radius);
+}
+
+GmpRaii TorusCSIDH::convert_to_gmp_key() const {
+    // Конвертация ключа в GmpRaii для некоторых проверок
+    GmpRaii key;
+    mpz_set_ui(key.get_mpz_t(), 0);
     
     for (size_t i = 0; i < private_key.size(); i++) {
         if (private_key[i] != 0) {
@@ -513,31 +637,9 @@ GmpRaii TorusCSIDH::convert_to_gmp_key(const std::vector<short>& private_key) co
     return key;
 }
 
-void TorusCSIDH::generate_primes() {
-    // Генерация простых чисел для CSIDH
-    // Для CSIDH-512 используем 74 простых числа
-    
-    params.security_bits = (security_level == SecurityConstants::SecurityLevel::LEVEL_128) ? 128 : 
-                          (security_level == SecurityConstants::SecurityLevel::LEVEL_192) ? 192 : 256;
-    
-    params.num_primes = (params.security_bits == 128) ? 74 : 
-                       (params.security_bits == 192) ? 110 : 138;
-    
-    params.max_key_magnitude = (params.security_bits == 128) ? 19 : 
-                              (params.security_bits == 192) ? 24 : 30;
-    
-    // Генерация простых чисел
-    params.primes.resize(params.num_primes);
-    
-    // В реальной системе здесь будет генерация подходящих простых чисел
-    // Для демонстрации используем фиксированные значения
-    for (size_t i = 0; i < params.num_primes; i++) {
-        params.primes[i] = GmpRaii(1000 + i * 100 + 1); // Пример простых чисел
-    }
+bool TorusCSIDH::is_equivalent_to_base_curve(const MontgomeryCurve& curve) const {
+    // Две кривые Монтгомери эквивалентны, если их j-инварианты совпадают
+    return curve.compute_j_invariant() == base_curve.compute_j_invariant();
 }
 
-void TorusCSIDH::initialize_relic() {
-    // Инициализация RELIC
-    // В реальной системе здесь будет инициализация библиотеки RELIC
-    // ...
-}
+} // namespace toruscsidh
