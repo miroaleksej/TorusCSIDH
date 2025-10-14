@@ -249,7 +249,7 @@ GmpRaii secure_gmp_random(const GmpRaii& max) {
     return result;
 }
 
-// ИСПРАВЛЕНИЕ: Улучшенная реализация механизма восстановления
+// ИСПРАВЛЕНИЕ: Улучшенная реализация механизма восстановления (без TPM)
 bool CodeIntegrityProtection::recover_from_backup() {
     std::lock_guard<std::mutex> lock(integrity_mutex);
     try {
@@ -303,12 +303,12 @@ bool CodeIntegrityProtection::recover_from_backup() {
             throw std::runtime_error("Backup integrity check failed");
         }
         
-        // Расшифровка резервной копии с использованием ключа из TPM
+        // Расшифровка резервной копии с использованием ключа из защищенного хранилища
         std::vector<unsigned char> decrypted_backup;
         decrypted_backup.resize(ciphertext_size - crypto_secretbox_MACBYTES);
         
-        // ИСПРАВЛЕНИЕ: Используем безопасный ключ из TPM
-        std::vector<unsigned char> backup_key = get_secure_backup_key();
+        // ИСПРАВЛЕНИЕ: Используем безопасный ключ из защищенного хранилища вместо TPM
+        std::vector<unsigned char> backup_key = get_secure_backup_key_from_storage();
         
         if (crypto_secretbox_open_easy(decrypted_backup.data(),
                                       ciphertext.data(),
@@ -398,22 +398,124 @@ bool CodeIntegrityProtection::recover_from_backup() {
     }
 }
 
-// ИСПРАВЛЕНИЕ: Безопасное хранение ключей с использованием TPM
-std::vector<unsigned char> CodeIntegrityProtection::get_secure_backup_key() const {
-    // В реальной системе ключ будет загружен из TPM
+// ИСПРАВЛЕНИЕ: Безопасное хранение ключей без TPM
+std::vector<unsigned char> CodeIntegrityProtection::get_secure_backup_key_from_storage() const {
+    // Используем защищенное хранилище вместо TPM
     std::vector<unsigned char> key(32);
     
-    // Используем TPM для генерации и хранения ключа
-    if (tpm_get_backup_key(key.data(), key.size()) != 0) {
-        // Если TPM недоступен, используем безопасный fallback
-        randombytes_buf(key.data(), key.size());
-        
-        // Логируем использование fallback-механизма
-        SecureAuditLogger::get_instance().log_event("security", 
-            "TPM not available, using fallback key mechanism", true);
+    // Попытка загрузить ключ из защищенного файла
+    if (std::filesystem::exists("secure_storage/backup_key.enc")) {
+        // Чтение зашифрованного ключа
+        std::ifstream key_file("secure_storage/backup_key.enc", std::ios::binary);
+        if (key_file) {
+            key_file.seekg(0, std::ios::end);
+            size_t size = key_file.tellg();
+            key_file.seekg(0, std::ios::beg);
+            
+            std::vector<unsigned char> encrypted_key(size);
+            key_file.read(reinterpret_cast<char*>(encrypted_key.data()), size);
+            
+            // Расшифровка ключа с использованием мастер-пароля (который может быть получен от пользователя)
+            if (decrypt_key_with_master_password(encrypted_key, key)) {
+                return key;
+            }
+        }
+    }
+    
+    // Если ключ не найден, генерируем новый и сохраняем его
+    randombytes_buf(key.data(), key.size());
+    
+    // Сохраняем ключ в защищенном виде
+    std::vector<unsigned char> encrypted_key;
+    if (encrypt_key_with_master_password(key, encrypted_key)) {
+        std::ofstream key_file("secure_storage/backup_key.enc", std::ios::binary);
+        if (key_file) {
+            key_file.write(reinterpret_cast<char*>(encrypted_key.data()), encrypted_key.size());
+        }
     }
     
     return key;
+}
+
+// Вспомогательная функция для шифрования ключа с использованием мастер-пароля
+bool CodeIntegrityProtection::encrypt_key_with_master_password(
+    const std::vector<unsigned char>& key,
+    std::vector<unsigned char>& encrypted_key) const {
+    
+    // Получаем мастер-пароль от пользователя (в реальном приложении)
+    std::string master_password = get_master_password_from_user();
+    
+    // Генерация соли
+    std::vector<unsigned char> salt(crypto_pwhash_SALTBYTES);
+    randombytes_buf(salt.data(), salt.size());
+    
+    // Генерация ключа шифрования из пароля
+    std::vector<unsigned char> encryption_key(crypto_secretbox_KEYBYTES);
+    if (crypto_pwhash(encryption_key.data(), encryption_key.size(),
+                     master_password.c_str(), master_password.size(),
+                     salt.data(), crypto_pwhash_OPSLIMIT_INTERACTIVE,
+                     crypto_pwhash_MEMLIMIT_INTERACTIVE,
+                     crypto_pwhash_ALG_DEFAULT) != 0) {
+        return false;
+    }
+    
+    // Генерация nonce
+    std::vector<unsigned char> nonce(crypto_secretbox_NONCEBYTES);
+    randombytes_buf(nonce.data(), nonce.size());
+    
+    // Шифрование ключа
+    encrypted_key.resize(key.size() + crypto_secretbox_MACBYTES + salt.size() + nonce.size());
+    crypto_secretbox_easy(encrypted_key.data() + salt.size() + nonce.size(),
+                         key.data(), key.size(),
+                         nonce.data(), encryption_key.data());
+    
+    // Сохраняем соль и nonce в начале
+    std::copy(salt.begin(), salt.end(), encrypted_key.begin());
+    std::copy(nonce.begin(), nonce.end(), encrypted_key.begin() + salt.size());
+    
+    return true;
+}
+
+// Вспомогательная функция для расшифровки ключа с использованием мастер-пароля
+bool CodeIntegrityProtection::decrypt_key_with_master_password(
+    const std::vector<unsigned char>& encrypted_key,
+    std::vector<unsigned char>& key) const {
+    
+    if (encrypted_key.size() < crypto_pwhash_SALTBYTES + crypto_secretbox_NONCEBYTES) {
+        return false;
+    }
+    
+    // Извлечение соли и nonce
+    std::vector<unsigned char> salt(encrypted_key.begin(), 
+                                  encrypted_key.begin() + crypto_pwhash_SALTBYTES);
+    std::vector<unsigned char> nonce(encrypted_key.begin() + crypto_pwhash_SALTBYTES,
+                                   encrypted_key.begin() + crypto_pwhash_SALTBYTES + crypto_secretbox_NONCEBYTES);
+    
+    // Получаем мастер-пароль от пользователя
+    std::string master_password = get_master_password_from_user();
+    
+    // Генерация ключа шифрования из пароля
+    std::vector<unsigned char> encryption_key(crypto_secretbox_KEYBYTES);
+    if (crypto_pwhash(encryption_key.data(), encryption_key.size(),
+                     master_password.c_str(), master_password.size(),
+                     salt.data(), crypto_pwhash_OPSLIMIT_INTERACTIVE,
+                     crypto_pwhash_MEMLIMIT_INTERACTIVE,
+                     crypto_pwhash_ALG_DEFAULT) != 0) {
+        return false;
+    }
+    
+    // Расшифровка ключа
+    size_t ciphertext_size = encrypted_key.size() - crypto_pwhash_SALTBYTES - crypto_secretbox_NONCEBYTES;
+    key.resize(ciphertext_size - crypto_secretbox_MACBYTES);
+    
+    if (crypto_secretbox_open_easy(key.data(),
+                                 encrypted_key.data() + crypto_pwhash_SALTBYTES + crypto_secretbox_NONCEBYTES,
+                                 ciphertext_size,
+                                 nonce.data(), encryption_key.data()) != 0) {
+        return false;
+    }
+    
+    return true;
 }
 
 // ИСПРАВЛЕНИЕ: Проверка геометрических критериев с криптографическим обоснованием
