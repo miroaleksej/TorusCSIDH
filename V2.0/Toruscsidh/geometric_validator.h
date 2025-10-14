@@ -1,306 +1,276 @@
-#ifndef GEOMETRIC_VALIDATOR_H
-#define GEOMETRIC_VALIDATOR_H
+#ifndef TORUSCSIDH_GEOMETRIC_VALIDATOR_H
+#define TORUSCSIDH_GEOMETRIC_VALIDATOR_H
 
 #include <vector>
 #include <gmpxx.h>
+#include <cmath>
+#include <limits>
+#include <algorithm>
+#include <numeric>
 #include <boost/graph/adjacency_list.hpp>
-#include <boost/graph/cuthill_mckee_ordering.hpp>
-#include <boost/graph/floyd_warshall_shortest.hpp>
 #include <boost/graph/laplacian_matrix.hpp>
+#include <boost/graph/floyd_warshall_shortest.hpp>
+#include <boost/graph/cuthill_mckee_ordering.hpp>
+#include <boost/graph/biconnected_components.hpp>
+#include <boost/graph/properties.hpp>
+#include <boost/graph/connected_components.hpp>
+#include <boost/property_map/property_map.hpp>
 #include <Eigen/Dense>
-#include "security_constants.h"
 #include "elliptic_curve.h"
 
-/**
- * @brief Граф изогений
- */
-typedef boost::adjacency_list<
-    boost::vecS, 
-    boost::vecS, 
-    boost::undirectedS,
-    boost::property<boost::vertex_index_t, int>,
-    boost::property<boost::edge_weight_t, double>
-> IsogenyGraph;
+namespace toruscsidh {
 
 /**
- * @brief Класс для геометрической проверки безопасности графа изогений
+ * @brief Валидатор геометрических свойств графа изогений
  * 
- * Выполняет анализ графа изогений на соответствие криптографическим требованиям.
+ * Реализует семикритериальную систему проверки структурной целостности кривых.
+ * Каждый критерий анализирует различные аспекты топологии графа изогений,
+ * обеспечивая защиту от атак через искусственные кривые и вырожденные структуры.
  */
 class GeometricValidator {
 public:
     /**
-     * @brief Конструктор
+     * @brief Конструктор с настройкой параметров безопасности
+     * 
+     * @param security_bits Уровень безопасности (128, 192 или 256 бит)
      */
-    GeometricValidator();
+    explicit GeometricValidator(int security_bits = 128);
     
     /**
-     * @brief Инициализация параметров безопасности для указанного уровня
-     * @param level Уровень безопасности
+     * @brief Полная проверка структурной целостности кривой
+     * 
+     * Выполняет комплексную проверку по всем семи критериям безопасности.
+     * 
+     * @param curve Проверяемая кривая
+     * @param primes Простые числа, используемые в CSIDH
+     * @param radius Радиус локального подграфа для анализа
+     * @return true, если кривая прошла все проверки
      */
-    void initialize_security_parameters(SecurityConstants::SecurityLevel level);
+    bool validate(const MontgomeryCurve& curve, 
+                 const std::vector<GmpRaii>& primes,
+                 int radius = 3) const;
     
     /**
-     * @brief Построение подграфа изогений вокруг заданной кривой
-     * @param curve Базовая кривая
+     * @brief Проверка цикломатического числа
+     * 
+     * Цикломатическое число = E - V + C, где:
+     * E - количество рёбер в подграфе
+     * V - количество вершин
+     * C - количество компонент связности
+     * 
+     * Для легитимных подграфов изогений это число должно быть ≥ 2
+     * 
+     * @param curve Центральная кривая подграфа
+     * @param primes Простые числа для построения подграфа
      * @param radius Радиус подграфа
-     * @return Подграф изогений
+     * @return true, если цикломатическое число в допустимых пределах
      */
-    IsogenyGraph build_isogeny_subgraph(const MontgomeryCurve& curve, size_t radius);
+    bool check_cyclomatic_number(const MontgomeryCurve& curve,
+                               const std::vector<GmpRaii>& primes,
+                               int radius = 2) const;
     
     /**
-     * @brief Вычисление цикломатического числа графа
-     * @param graph Граф изогений
+     * @brief Проверка спектрального зазора
+     * 
+     * Спектральный зазор = λ₂ - λ₁, где λ₁ и λ₂ - первые два собственных значения
+     * нормализованной матрицы Лапласа графа. Для легитимных графов изогений
+     * спектральный зазор должен быть в определенном диапазоне.
+     * 
+     * @param curve Центральная кривая подграфа
+     * @param primes Простые числа для построения подграфа
+     * @param radius Радиус подграфа
+     * @return true, если спектральный зазор соответствует ожидаемому
+     */
+    bool check_spectral_gap(const MontgomeryCurve& curve,
+                          const std::vector<GmpRaii>& primes,
+                          int radius = 2) const;
+    
+    /**
+     * @brief Проверка локальной связности
+     * 
+     * Убедиться, что подграф является 2-связным (бикомпонентным),
+     * что гарантирует отсутствие точек артикуляции.
+     * 
+     * @param curve Центральная кривая подграфа
+     * @param primes Простые числа для построения подграфа
+     * @param radius Радиус подграфа
+     * @return true, если подграф 2-связен
+     */
+    bool check_local_connectivity(const MontgomeryCurve& curve,
+                                const std::vector<GmpRaii>& primes,
+                                int radius = 2) const;
+    
+    /**
+     * @brief Проверка на наличие длинных путей
+     * 
+     * Обнаруживает атаки, использующие кривые с неестественно длинными
+     * последовательностями изогений одного типа.
+     * 
+     * @param curve Центральная кривая подграфа
+     * @param primes Простые числа для построения подграфа
+     * @param radius Радиус подграфа
+     * @return true, если не обнаружено аномально длинных путей
+     */
+    bool check_long_paths(const MontgomeryCurve& curve,
+                        const std::vector<GmpRaii>& primes,
+                        int radius = 3) const;
+    
+    /**
+     * @brief Проверка вырожденной топологии
+     * 
+     * Обнаруживает кривые с вырожденной структурой графа (например,
+     * деревья вместо графов с циклами).
+     * 
+     * @param curve Центральная кривая подграфа
+     * @param primes Простые числа для построения подграфа
+     * @param radius Радиус подграфа
+     * @return true, если топология не вырождена
+     */
+    bool check_degenerate_topology(const MontgomeryCurve& curve,
+                                 const std::vector<GmpRaii>& primes,
+                                 int radius = 2) const;
+    
+    /**
+     * @brief Проверка симметрии графа
+     * 
+     * Легитимные графы изогений обладают определенной симметрией.
+     * Эта проверка анализирует распределение степеней вершин.
+     * 
+     * @param curve Центральная кривая подграфа
+     * @param primes Простые числа для построения подграфа
+     * @param radius Радиус подграфа
+     * @return true, если граф демонстрирует ожидаемую симметрию
+     */
+    bool check_graph_symmetry(const MontgomeryCurve& curve,
+                            const std::vector<GmpRaii>& primes,
+                            int radius = 2) const;
+    
+    /**
+     * @brief Проверка метрической согласованности
+     * 
+     * Проверяет, что расстояния в подграфе соответствуют ожидаемой
+     * структуре графа изогений (метрика Канторовича-Рубинштейна).
+     * 
+     * @param curve Центральная кривая подграфа
+     * @param primes Простые числа для построения подграфа
+     * @param radius Радиус подграфа
+     * @return true, если метрика соответствует ожиданиям
+     */
+    bool check_metric_consistency(const MontgomeryCurve& curve,
+                                const std::vector<GmpRaii>& primes,
+                                int radius = 3) const;
+    
+    /**
+     * @brief Проверка минимальной степени вершин
+     * 
+     * Убеждается, что каждая вершина имеет достаточное количество
+     * соседей, соответствующее количеству простых чисел в системе.
+     * 
+     * @param curve Центральная кривая подграфа
+     * @param primes Простые числа для построения подграфа
+     * @param radius Радиус подграфа
+     * @return true, если все вершины имеют достаточную степень
+     */
+    bool check_minimal_degree(const MontgomeryCurve& curve,
+                            const std::vector<GmpRaii>& primes,
+                            int radius = 1) const;
+
+    /**
+     * @brief Получить текущие параметры безопасности
+     * @return Параметры безопасности
+     */
+    const std::vector<double>& get_security_parameters() const;
+
+private:
+    // Тип графа для представления локального подграфа изогений
+    using Graph = boost::adjacency_list<
+        boost::vecS, 
+        boost::vecS, 
+        boost::undirectedS,
+        boost::property<boost::vertex_index_t, int>,
+        boost::property<boost::edge_weight_t, double>
+    >;
+    
+    /**
+     * @brief Построить локальный подграф изогений
+     * 
+     * @param center_curve Центральная кривая
+     * @param primes Простые числа для построения изогений
+     * @param radius Радиус подграфа
+     * @return Построенный граф
+     */
+    Graph build_local_isogeny_graph(const MontgomeryCurve& center_curve,
+                                  const std::vector<GmpRaii>& primes,
+                                  int radius) const;
+    
+    /**
+     * @brief Вычислить цикломатическое число графа
+     * 
+     * @param graph Граф для анализа
      * @return Цикломатическое число
      */
-    double compute_cyclomatic_number(const IsogenyGraph& graph);
+    double calculate_cyclomatic_number(const Graph& graph) const;
     
     /**
-     * @brief Вычисление спектрального зазора графа
-     * @param graph Граф изогений
+     * @brief Вычислить спектральный зазор графа
+     * 
+     * @param graph Граф для анализа
      * @return Спектральный зазор
      */
-    double compute_spectral_gap(const IsogenyGraph& graph);
+    double calculate_spectral_gap(const Graph& graph) const;
     
     /**
-     * @brief Вычисление коэффициента кластеризации графа
-     * @param graph Граф изогений
-     * @return Коэффициент кластеризации
+     * @brief Получить матрицу Лапласа графа
+     * 
+     * @param graph Граф для анализа
+     * @return Матрица Лапласа
      */
-    double compute_clustering_coefficient(const IsogenyGraph& graph);
+    Eigen::MatrixXd get_laplacian_matrix(const Graph& graph) const;
     
     /**
-     * @brief Вычисление энтропии степеней узлов графа
-     * @param graph Граф изогений
-     * @return Энтропия степеней
+     * @brief Вычислить распределение степеней вершин
+     * 
+     * @param graph Граф для анализа
+     * @return Вектор степеней вершин
      */
-    double compute_degree_entropy(const IsogenyGraph& graph);
+    std::vector<int> calculate_degree_distribution(const Graph& graph) const;
     
     /**
-     * @brief Вычисление энтропии кратчайших путей графа
-     * @param graph Граф изогений
-     * @return Энтропия кратчайших путей
+     * @brief Вычислить диаметр подграфа
+     * 
+     * @param graph Граф для анализа
+     * @return Диаметр графа
      */
-    double compute_shortest_path_entropy(const IsogenyGraph& graph);
+    int calculate_diameter(const Graph& graph) const;
     
     /**
-     * @brief Проверка безопасности кривой по геометрическим критериям
-     * @param curve Кривая
-     * @param subgraph Подграф изогений
-     * @param cyclomatic_score Результат проверки цикломатического числа
-     * @param spectral_gap_score Результат проверки спектрального зазора
-     * @param clustering_score Результат проверки коэффициента кластеризации
-     * @param degree_entropy_score Результат проверки энтропии степеней
-     * @param distance_entropy_score Результат проверки энтропии кратчайших путей
-     * @return true, если кривая безопасна
+     * @brief Проверить, является ли граф деревом
+     * 
+     * @param graph Граф для анализа
+     * @return true, если граф является деревом
      */
-    bool validate_curve(const MontgomeryCurve& curve,
-                        const IsogenyGraph& subgraph,
-                        double& cyclomatic_score,
-                        double& spectral_gap_score,
-                        double& clustering_score,
-                        double& degree_entropy_score,
-                        double& distance_entropy_score);
+    bool is_tree(const Graph& graph) const;
     
-private:
-    SecurityConstants::SecurityLevel security_level;  ///< Уровень безопасности
+    // Параметры безопасности, зависящие от уровня защиты
+    int security_bits_;
+    std::vector<double> security_params_;
+    
+    // Константы для различных уровней безопасности
+    static constexpr double MIN_CYCLOMATIC_NUMBER_128 = 1.95;
+    static constexpr double MIN_CYCLOMATIC_NUMBER_192 = 1.97;
+    static constexpr double MIN_CYCLOMATIC_NUMBER_256 = 1.99;
+    
+    static constexpr double MIN_SPECTRAL_GAP_128 = 0.15;
+    static constexpr double MIN_SPECTRAL_GAP_192 = 0.18;
+    static constexpr double MIN_SPECTRAL_GAP_256 = 0.22;
+    
+    static constexpr double MAX_PATH_LENGTH_RATIO_128 = 0.75;
+    static constexpr double MAX_PATH_LENGTH_RATIO_192 = 0.70;
+    static constexpr double MAX_PATH_LENGTH_RATIO_256 = 0.65;
+    
+    static constexpr int MIN_DEGREE_MULTIPLIER = 2;
 };
 
-GeometricValidator::GeometricValidator() : security_level(SecurityConstants::SecurityLevel::LEVEL_128) {
-    SecurityConstants::initialize(security_level);
-}
+} // namespace toruscsidh
 
-void GeometricValidator::initialize_security_parameters(SecurityConstants::SecurityLevel level) {
-    security_level = level;
-    SecurityConstants::initialize(security_level);
-}
-
-IsogenyGraph GeometricValidator::build_isogeny_subgraph(const MontgomeryCurve& curve, size_t radius) {
-    IsogenyGraph subgraph;
-    
-    // В реальной системе здесь будет построение подграфа изогений
-    // с использованием алгоритмов поиска в ширину вокруг заданной кривой
-    
-    // Для демонстрации добавим несколько вершин и ребер
-    for (size_t i = 0; i < radius * 2; i++) {
-        boost::add_vertex(subgraph);
-    }
-    
-    // Добавляем ребра
-    for (size_t i = 0; i < num_vertices(subgraph) - 1; i++) {
-        boost::add_edge(i, i + 1, subgraph);
-    }
-    
-    return subgraph;
-}
-
-double GeometricValidator::compute_cyclomatic_number(const IsogenyGraph& graph) {
-    // Цикломатическое число = E - V + C, где
-    // E - количество ребер
-    // V - количество вершин
-    // C - количество компонент связности
-    
-    size_t edges = num_edges(graph);
-    size_t vertices = num_vertices(graph);
-    size_t components = 1; // В реальной системе нужно вычислить
-    
-    return static_cast<double>(edges - vertices + components) / vertices;
-}
-
-double GeometricValidator::compute_spectral_gap(const IsogenyGraph& graph) {
-    // Спектральный зазор = λ1 - λ2, где λ1 и λ2 - первые два собственных значения
-    // матрицы Лапласа графа
-    
-    // Создаем матрицу Лапласа
-    Eigen::MatrixXd laplacian = boost::laplacian_matrix(graph);
-    
-    // Вычисляем собственные значения
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(laplacian);
-    Eigen::VectorXd eigenvalues = solver.eigenvalues();
-    
-    // Сортируем собственные значения
-    std::vector<double> sorted_eigenvalues;
-    for (int i = 0; i < eigenvalues.size(); i++) {
-        sorted_eigenvalues.push_back(eigenvalues(i));
-    }
-    std::sort(sorted_eigenvalues.begin(), sorted_eigenvalues.end());
-    
-    // Спектральный зазор = λ1 - λ0 (λ0 всегда 0)
-    if (sorted_eigenvalues.size() < 2) {
-        return 0.0;
-    }
-    
-    return sorted_eigenvalues[1] - sorted_eigenvalues[0];
-}
-
-double GeometricValidator::compute_clustering_coefficient(const IsogenyGraph& graph) {
-    // Коэффициент кластеризации = 3 * количество треугольников / количество связок
-    
-    size_t triangles = 0;
-    size_t triples = 0;
-    
-    // Для каждой вершины
-    for (auto v : boost::make_iterator_range(boost::vertices(graph))) {
-        size_t degree = boost::degree(v, graph);
-        if (degree < 2) continue;
-        
-        // Количество связок для вершины
-        triples += degree * (degree - 1) / 2;
-        
-        // Подсчет треугольников
-        for (auto u : boost::make_iterator_range(boost::adjacent_vertices(v, graph))) {
-            for (auto w : boost::make_iterator_range(boost::adjacent_vertices(v, graph))) {
-                if (u < w && boost::edge(u, w, graph).second) {
-                    triangles++;
-                }
-            }
-        }
-    }
-    
-    if (triples == 0) return 0.0;
-    
-    return static_cast<double>(3 * triangles) / triples;
-}
-
-double GeometricValidator::compute_degree_entropy(const IsogenyGraph& graph) {
-    // Энтропия степеней = -sum(p_i * log2(p_i)), где p_i - вероятность степени i
-    
-    std::map<size_t, size_t> degree_count;
-    size_t total_vertices = num_vertices(graph);
-    
-    // Подсчет вершин каждой степени
-    for (auto v : boost::make_iterator_range(boost::vertices(graph))) {
-        size_t degree = boost::degree(v, graph);
-        degree_count[degree]++;
-    }
-    
-    // Вычисление энтропии
-    double entropy = 0.0;
-    for (const auto& entry : degree_count) {
-        double p = static_cast<double>(entry.second) / total_vertices;
-        if (p > 0) {
-            entropy -= p * std::log2(p);
-        }
-    }
-    
-    return entropy;
-}
-
-double GeometricValidator::compute_shortest_path_entropy(const IsogenyGraph& graph) {
-    // Энтропия кратчайших путей = -sum(p_d * log2(p_d)), где p_d - вероятность длины пути d
-    
-    std::map<size_t, size_t> path_length_count;
-    size_t total_paths = 0;
-    
-    // Вычисляем все кратчайшие пути
-    std::vector<std::vector<double>> distances(num_vertices(graph), 
-                                            std::vector<double>(num_vertices(graph), 0));
-    
-    boost::floyd_warshall_all_pairs_shortest_paths(graph, distances);
-    
-    // Подсчет длин путей
-    for (size_t i = 0; i < num_vertices(graph); i++) {
-        for (size_t j = i + 1; j < num_vertices(graph); j++) {
-            if (distances[i][j] < std::numeric_limits<double>::infinity()) {
-                size_t length = static_cast<size_t>(distances[i][j]);
-                path_length_count[length]++;
-                total_paths++;
-            }
-        }
-    }
-    
-    // Вычисление энтропии
-    double entropy = 0.0;
-    for (const auto& entry : path_length_count) {
-        double p = static_cast<double>(entry.second) / total_paths;
-        if (p > 0) {
-            entropy -= p * std::log2(p);
-        }
-    }
-    
-    return entropy;
-}
-
-bool GeometricValidator::validate_curve(const MontgomeryCurve& curve,
-                                      const IsogenyGraph& subgraph,
-                                      double& cyclomatic_score,
-                                      double& spectral_gap_score,
-                                      double& clustering_score,
-                                      double& degree_entropy_score,
-                                      double& distance_entropy_score) {
-    // Вычисляем все геометрические метрики
-    cyclomatic_score = compute_cyclomatic_number(subgraph);
-    spectral_gap_score = compute_spectral_gap(subgraph);
-    clustering_score = compute_clustering_coefficient(subgraph);
-    degree_entropy_score = compute_degree_entropy(subgraph);
-    distance_entropy_score = compute_shortest_path_entropy(subgraph);
-    
-    // Проверка цикломатического числа
-    if (cyclomatic_score > SecurityConstants::MAX_CYCLOMATIC) {
-        return false;
-    }
-    
-    // Проверка спектрального зазора
-    if (spectral_gap_score < SecurityConstants::MIN_SPECTRAL_GAP) {
-        return false;
-    }
-    
-    // Проверка коэффициента кластеризации
-    if (clustering_score < SecurityConstants::MIN_CLUSTERING_COEFF) {
-        return false;
-    }
-    
-    // Проверка энтропии степеней
-    if (degree_entropy_score < SecurityConstants::MIN_DEGREE_ENTROPY) {
-        return false;
-    }
-    
-    // Проверка энтропии кратчайших путей
-    if (distance_entropy_score < SecurityConstants::MIN_DISTANCE_ENTROPY) {
-        return false;
-    }
-    
-    return true;
-}
-
-#endif // GEOMETRIC_VALIDATOR_H
+#endif // TORUSCSIDH_GEOMETRIC_VALIDATOR_H
