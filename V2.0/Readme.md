@@ -1,7 +1,5 @@
-# TorusCSIDH: Постквантовая криптографическая система на основе CSIDH с геометрической проверкой безопасности (работы поинаписанию кода не завершены. На данном этапе - это прототип!)
+# TorusCSIDH: Постквантовая криптографическая система на основе CSIDH с геометрической проверкой безопасности (работы по написанию кода не завершены. На данном этапе - это прототип!)
 
-![Build Status](https://github.com/toruscsidh/toruscsidh/workflows/Build/badge.svg)
-![Security Scan](https://github.com/toruscsidh/toruscsidh/workflows/Security%20Scan/badge.svg)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
 
 **TorusCSIDH** — это высокобезопасная постквантовая криптографическая библиотека, реализующая протокол CSIDH (Commutative Supersingular Isogeny Diffie-Hellman) с инновационной геометрической проверкой безопасности. Система предназначена для защиты от квантовых атак и обеспечивает долгосрочную безопасность криптографических приложений, включая интеграцию с Bitcoin.
