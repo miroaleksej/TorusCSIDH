@@ -1,4 +1,4 @@
-# TorusCSIDH: Постквантовая криптографическая система на основе CSIDH с геометрической проверкой безопасности (работы поинаписанию кода не завершены. На данном этапе - это концепт!)
+# TorusCSIDH: Постквантовая криптографическая система на основе CSIDH с геометрической проверкой безопасности (работы поинаписанию кода не завершены. На данном этапе - это прототип!)
 
 ![Build Status](https://github.com/toruscsidh/toruscsidh/workflows/Build/badge.svg)
 ![Security Scan](https://github.com/toruscsidh/toruscsidh/workflows/Security%20Scan/badge.svg)
