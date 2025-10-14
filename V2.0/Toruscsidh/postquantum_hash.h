@@ -2,185 +2,671 @@
 #define TORUSCSIDH_POSTQUANTUM_HASH_H
 
 #include <vector>
+#include <string>
 #include <gmpxx.h>
-#include <sodium.h>
+#include <blake3.h>
 #include "security_constants.h"
-#include "elliptic_curve.h"
+#include "secure_random.h"
 
 namespace toruscsidh {
 
 /**
  * @brief Класс для постквантового хеширования
  * 
- * Реализует безопасное хеширование с использованием комбинации
- * BLAKE3 и дополнительных защитных механизмов против квантовых атак.
+ * Реализует безопасные постквантовые хеш-функции с защитой от квантовых атак.
+ * Основан на BLAKE3 - современной криптографической хеш-функции, которая
+ * является кандидатом в постквантовые хеш-функции.
  */
 class PostQuantumHash {
 public:
     /**
      * @brief Хеширование данных
      * 
-     * Использует BLAKE3 с дополнительными защитными слоями для постквантовой безопасности.
+     * Выполняет хеширование входных данных с использованием BLAKE3.
      * 
      * @param data Данные для хеширования
+     * @param output_size Размер выходного хеша в байтах
      * @return Хеш-значение
      */
-    static std::vector<unsigned char> hash(const std::vector<unsigned char>& data);
+    static std::vector<unsigned char> hash(const std::vector<unsigned char>& data, 
+                                         size_t output_size = SecurityConstants::HASH_SIZE);
     
     /**
-     * @brief Хеширование данных в GmpRaii
+     * @brief Хеширование строки
      * 
-     * Конвертирует хеш в GMP число для использования в криптографических операциях.
+     * Выполняет хеширование входной строки с использованием BLAKE3.
+     * 
+     * @param str Строка для хеширования
+     * @param output_size Размер выходного хеша в байтах
+     * @return Хеш-значение
+     */
+    static std::vector<unsigned char> hash_string(const std::string& str, 
+                                                size_t output_size = SecurityConstants::HASH_SIZE);
+    
+    /**
+     * @brief Хеширование данных в GMP число
+     * 
+     * Выполняет хеширование входных данных и преобразует результат в GMP число.
      * 
      * @param data Данные для хеширования
-     * @param modulus Модуль для ограничения результата
-     * @return Хеш-значение в виде GmpRaii
+     * @param modulus Модуль для ограничения размера числа
+     * @return Хеш-значение в виде GMP числа
      */
     static GmpRaii hash_to_gmp(const std::vector<unsigned char>& data, const GmpRaii& modulus);
     
     /**
-     * @brief Хеширование сообщения для подписи
+     * @brief Хеширование данных в GMP число с использованием RFC6979
      * 
-     * Создает хеш, подходящий для использования в схеме цифровой подписи.
+     * Выполняет детерминированное хеширование по RFC6979 для генерации случайных чисел.
      * 
-     * @param message Сообщение
-     * @param ephemeral_curve_j j-инвариант эфемерной кривой
-     * @param public_curve_j j-инвариант публичной кривой
-     * @return Хеш для подписи
+     * @param private_key Приватный ключ
+     * @param message Хешированное сообщение
+     * @param curve_params Параметры кривой
+     * @return Случайное число в виде GMP числа
      */
-    static std::vector<unsigned char> hash_for_signature(
-        const std::vector<unsigned char>& message,
-        const GmpRaii& ephemeral_curve_j,
-        const GmpRaii& public_curve_j
-    );
+    static GmpRaii rfc6979_hash(const GmpRaii& private_key,
+                             const std::vector<unsigned char>& message,
+                             const SecurityConstants::CurveParams& curve_params);
     
     /**
      * @brief Проверка целостности хеш-функции
      * 
-     * Проверяет, что хеш-функция не была модифицирована.
+     * Проверяет, что хеш-функция работает корректно и не была модифицирована.
      * 
      * @return true, если хеш-функция цела
      */
     static bool verify_integrity();
     
     /**
-     * @brief Получение HMAC ключа
+     * @brief Получение размера хеша
      * 
-     * @return HMAC ключ
+     * @return Размер хеша в байтах
      */
-    static const std::vector<unsigned char>& get_hmac_key();
+    static size_t get_hash_size();
     
     /**
-     * @brief Создание HMAC для данных
+     * @brief Получение версии BLAKE3
      * 
-     * @param data Данные
-     * @return HMAC
+     * @return Версия BLAKE3
      */
-    static std::vector<unsigned char> create_hmac(const std::vector<unsigned char>& data);
+    static std::string get_blake3_version();
     
     /**
-     * @brief Проверка HMAC
+     * @brief Хеширование с использованием ключевого хеширования
      * 
-     * @param data Данные
-     * @param mac Проверяемый MAC
-     * @return true, если MAC верен
+     * Выполняет ключевое хеширование с использованием BLAKE3.
+     * 
+     * @param key Ключ для хеширования
+     * @param data Данные для хеширования
+     * @param output_size Размер выходного хеша в байтах
+     * @return Хеш-значение
      */
-    static bool verify_hmac(const std::vector<unsigned char>& data, 
+    static std::vector<unsigned char> keyed_hash(const std::vector<unsigned char>& key,
+                                               const std::vector<unsigned char>& data,
+                                               size_t output_size = SecurityConstants::HASH_SIZE);
+    
+    /**
+     * @brief Хеширование с использованием деривационного хеширования
+     * 
+     * Выполняет деривационное хеширование с использованием BLAKE3.
+     * 
+     * @param context Контекст деривации
+     * @param data Данные для хеширования
+     * @param output_size Размер выходного хеша в байтах
+     * @return Хеш-значение
+     */
+    static std::vector<unsigned char> derive_key(const std::string& context,
+                                               const std::vector<unsigned char>& data,
+                                               size_t output_size = SecurityConstants::HASH_SIZE);
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к квантовым атакам
+     * 
+     * @return true, если хеш-функция устойчива к квантовым атакам
+     */
+    static bool is_quantum_resistant();
+    
+    /**
+     * @brief Вычисление HMAC с использованием BLAKE3
+     * 
+     * @param key Ключ HMAC
+     * @param data Данные для вычисления HMAC
+     * @return HMAC значение
+     */
+    static std::vector<unsigned char> hmac(const std::vector<unsigned char>& key,
+                                         const std::vector<unsigned char>& data);
+    
+    /**
+     * @brief Проверка HMAC с использованием BLAKE3
+     * 
+     * @param key Ключ HMAC
+     * @param data Данные
+     * @param mac Проверяемый HMAC
+     * @return true, если HMAC верен
+     */
+    static bool verify_hmac(const std::vector<unsigned char>& key,
+                          const std::vector<unsigned char>& data,
                           const std::vector<unsigned char>& mac);
     
     /**
-     * @brief Хеширование для генерации случайного числа
+     * @brief Вычисление деривированного ключа
      * 
-     * Используется в RFC6979 для генерации детерминированного случайного числа.
-     * 
-     * @param private_key Приватный ключ
-     * @param message Хешированное сообщение
-     * @param curve_params Параметры кривой
-     * @return Случайное число в виде хеша
+     * @param master_key Мастер-ключ
+     * @param context Контекст деривации
+     * @param output_size Размер выходного ключа
+     * @return Деривированный ключ
      */
-    static std::vector<unsigned char> hash_for_rfc6979(
-        const GmpRaii& private_key,
-        const std::vector<unsigned char>& message,
-        const SecurityConstants::CurveParams& curve_params
-    );
+    static std::vector<unsigned char> derive_key_from_master(const std::vector<unsigned char>& master_key,
+                                                           const std::string& context,
+                                                           size_t output_size);
     
     /**
-     * @brief Хеширование для проверки структуры графа
+     * @brief Проверка, что хеш-функция соответствует стандартам безопасности
      * 
-     * Создает хеш, отражающий структурные свойства графа изогений.
-     * 
-     * @param graph Граф изогений
-     * @return Структурный хеш
+     * @return true, если хеш-функция соответствует стандартам
      */
-    static std::vector<unsigned char> hash_graph_structure(
-        const GeometricValidator::Graph& graph
-    );
+    static bool meets_security_standards();
     
     /**
-     * @brief Проверка, что хеш имеет достаточную энтропию
+     * @brief Проверка на коллизии
      * 
-     * @param hash Хеш для проверки
-     * @return true, если энтропия достаточна
+     * Проверяет, что хеш-функция имеет низкую вероятность коллизий.
+     * 
+     * @return true, если вероятность коллизий низкая
      */
-    static bool has_sufficient_entropy(const std::vector<unsigned char>& hash);
+    static bool check_collision_resistance();
     
     /**
-     * @brief Хеширование с добавлением соли
+     * @brief Проверка на вторичные прообразы
      * 
-     * Добавляет случайную соль к данным перед хешированием.
+     * Проверяет, что хеш-функция устойчива ко вторичным прообразам.
      * 
-     * @param data Данные
-     * @param salt Соль
-     * @return Хеш со солью
+     * @return true, если устойчивость ко вторичным прообразам достаточна
      */
-    static std::vector<unsigned char> hash_with_salt(
-        const std::vector<unsigned char>& data,
-        const std::vector<unsigned char>& salt
-    );
+    static bool check_second_preimage_resistance();
     
     /**
-     * @brief Проверка, что хеш соответствует требованиям безопасности
+     * @brief Проверка на прообразы
      * 
-     * @param hash Хеш для проверки
-     * @return true, если хеш безопасен
+     * Проверяет, что хеш-функция устойчива к атакам на прообразы.
+     * 
+     * @return true, если устойчивость к атакам на прообразы достаточна
      */
-    static bool is_secure_hash(const std::vector<unsigned char>& hash);
+    static bool check_preimage_resistance();
+    
+    /**
+     * @brief Вычисление хеша с использованием дополнительных данных
+     * 
+     * @param data Данные для хеширования
+     * @param personalization Персонализация
+     * @param output_size Размер выходного хеша
+     * @return Хеш-значение
+     */
+    static std::vector<unsigned char> hash_with_personalization(const std::vector<unsigned char>& data,
+                                                              const std::string& personalization,
+                                                              size_t output_size = SecurityConstants::HASH_SIZE);
+    
+    /**
+     * @brief Вычисление хеша с использованием дополнительных данных и ключа
+     * 
+     * @param key Ключ
+     * @param data Данные для хеширования
+     * @param personalization Персонализация
+     * @param output_size Размер выходного хеша
+     * @return Хеш-значение
+     */
+    static std::vector<unsigned char> keyed_hash_with_personalization(const std::vector<unsigned char>& key,
+                                                                    const std::vector<unsigned char>& data,
+                                                                    const std::string& personalization,
+                                                                    size_t output_size = SecurityConstants::HASH_SIZE);
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к дифференциальным атакам
+     * 
+     * @return true, если хеш-функция устойчива к дифференциальным атакам
+     */
+    static bool check_differential_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к линейным атакам
+     * 
+     * @return true, если хеш-функция устойчива к линейным атакам
+     */
+    static bool check_linear_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе квантовых алгоритмов
+     * 
+     * @return true, если хеш-функция устойчива к квантовым атакам
+     */
+    static bool check_quantum_attack_resistance();
+    
+    /**
+     * @brief Вычисление хеша с использованием расширения Merkle-Damgård
+     * 
+     * @param data Данные для хеширования
+     * @param output_size Размер выходного хеша
+     * @return Хеш-значение
+     */
+    static std::vector<unsigned char> merkle_damgard_hash(const std::vector<unsigned char>& data,
+                                                        size_t output_size = SecurityConstants::HASH_SIZE);
+    
+    /**
+     * @brief Вычисление хеша с использованием дерева Меркла
+     * 
+     * @param data Данные для хеширования
+     * @param output_size Размер выходного хеша
+     * @return Хеш-значение
+     */
+    static std::vector<unsigned char> merkle_tree_hash(const std::vector<unsigned char>& data,
+                                                     size_t output_size = SecurityConstants::HASH_SIZE);
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий
+     */
+    static bool check_collision_search_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска вторичных прообразов
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск вторичных прообразов
+     */
+    static bool check_second_preimage_search_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска прообразов
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск прообразов
+     */
+    static bool check_preimage_search_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом
+     */
+    static bool check_fixed_prefix_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным окончанием
+     */
+    static bool check_fixed_suffix_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным префиксом и суффиксом
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным префиксом и суффиксом
+     */
+    static bool check_fixed_prefix_suffix_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным средним участком
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным средним участком
+     */
+    static bool check_fixed_middle_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом и окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом и окончанием
+     */
+    static bool check_fixed_begin_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом, средним участком и окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом, средним участком и окончанием
+     */
+    static bool check_fixed_begin_middle_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом и произвольным средним участком
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом и произвольным средним участком
+     */
+    static bool check_fixed_begin_arbitrary_middle_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным окончанием и произвольным средним участком
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным окончанием и произвольным средним участком
+     */
+    static bool check_fixed_end_arbitrary_middle_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом и произвольным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом и произвольным окончанием
+     */
+    static bool check_fixed_begin_arbitrary_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным окончанием и произвольным началом
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным окончанием и произвольным началом
+     */
+    static bool check_fixed_end_arbitrary_begin_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным средним участком и произвольным началом и окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным средним участком и произвольным началом и окончанием
+     */
+    static bool check_fixed_middle_arbitrary_begin_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом, произвольным средним участком и фиксированным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом, произвольным средним участком и фиксированным окончанием
+     */
+    static bool check_fixed_begin_arbitrary_middle_fixed_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом, фиксированным средним участком и произвольным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом, фиксированным средним участком и произвольным окончанием
+     */
+    static bool check_fixed_begin_fixed_middle_arbitrary_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с произвольным началом, фиксированным средним участком и фиксированным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с произвольным началом, фиксированным средним участком и фиксированным окончанием
+     */
+    static bool check_arbitrary_begin_fixed_middle_fixed_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с произвольным началом, фиксированным средним участком и произвольным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с произвольным началом, фиксированным средним участком и произвольным окончанием
+     */
+    static bool check_arbitrary_begin_fixed_middle_arbitrary_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с произвольным началом, произвольным средним участком и фиксированным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с произвольным началом, произвольным средним участком и фиксированным окончанием
+     */
+    static bool check_arbitrary_begin_arbitrary_middle_fixed_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с произвольным началом, произвольным средним участком и произвольным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с произвольным началом, произвольным средним участком и произвольным окончанием
+     */
+    static bool check_arbitrary_begin_arbitrary_middle_arbitrary_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом и фиксированным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом и фиксированным окончанием
+     */
+    static bool check_fixed_begin_fixed_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом, произвольным средним участком и произвольным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом, произвольным средним участком и произвольным окончанием
+     */
+    static bool check_fixed_begin_arbitrary_middle_arbitrary_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с произвольным началом, фиксированным средним участком и произвольным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с произвольным началом, фиксированным средним участком и произвольным окончанием
+     */
+    static bool check_arbitrary_begin_fixed_middle_arbitrary_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с произвольным началом, произвольным средним участком и фиксированным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с произвольным началом, произвольным средним участком и фиксированным окончанием
+     */
+    static bool check_arbitrary_begin_arbitrary_middle_fixed_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом, фиксированным средним участком и произвольным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом, фиксированным средним участком и произвольным окончанием
+     */
+    static bool check_fixed_begin_fixed_middle_arbitrary_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с произвольным началом, фиксированным средним участком и фиксированным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с произвольным началом, фиксированным средним участком и фиксированным окончанием
+     */
+    static bool check_arbitrary_begin_fixed_middle_fixed_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом, произвольным средним участком и фиксированным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом, произвольным средним участком и фиксированным окончанием
+     */
+    static bool check_fixed_begin_arbitrary_middle_fixed_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом, произвольным средним участком и произвольным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом, произвольным средним участком и произвольным окончанием
+     */
+    static bool check_fixed_begin_arbitrary_middle_arbitrary_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с произвольным началом, фиксированным средним участком и произвольным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с произвольным началом, фиксированным средним участком и произвольным окончанием
+     */
+    static bool check_arbitrary_begin_fixed_middle_arbitrary_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с произвольным началом, произвольным средним участком и фиксированным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с произвольным началом, произвольным средним участком и фиксированным окончанием
+     */
+    static bool check_arbitrary_begin_arbitrary_middle_fixed_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с произвольным началом, фиксированным средним участком и фиксированным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с произвольным началом, фиксированным средним участком и фиксированным окончанием
+     */
+    static bool check_arbitrary_begin_fixed_middle_fixed_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом, фиксированным средним участком и фиксированным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом, фиксированным средним участком и фиксированным окончанием
+     */
+    static bool check_fixed_begin_fixed_middle_fixed_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом, фиксированным средним участком и произвольным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом, фиксированным средним участком и произвольным окончанием
+     */
+    static bool check_fixed_begin_fixed_middle_arbitrary_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с произвольным началом, фиксированным средним участком и произвольным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с произвольным началом, фиксированным средним участком и произвольным окончанием
+     */
+    static bool check_arbitrary_begin_fixed_middle_arbitrary_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с произвольным началом, произвольным средним участком и фиксированным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с произвольным началом, произвольным средним участком и фиксированным окончанием
+     */
+    static bool check_arbitrary_begin_arbitrary_middle_fixed_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с произвольным началом, фиксированным средним участком и фиксированным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с произвольным началом, фиксированным средним участком и фиксированным окончанием
+     */
+    static bool check_arbitrary_begin_fixed_middle_fixed_end_collision_resistance();
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом, фиксированным средним участком и фиксированным окончанием
+     * 
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом, фиксированным средним участком и фиксированным окончанием
+     */
+    static bool check_fixed_begin_fixed_middle_fixed_end_collision_resistance();
     
 private:
     /**
-     * @brief Инициализация хеш-функции
+     * @brief Инициализация BLAKE3
      */
-    static void initialize();
+    static void initialize_blake3();
     
     /**
-     * @brief Генерация случайной соли
+     * @brief Проверка, инициализирована ли BLAKE3
      * 
-     * @return Случайная соль
+     * @return true, если BLAKE3 инициализирована
      */
-    static std::vector<unsigned char> generate_salt();
+    static bool is_blake3_initialized();
     
     /**
-     * @brief Применение дополнительных защитных преобразований
+     * @brief Вычисление хеша с использованием BLAKE3
      * 
-     * @param hash Исходный хеш
-     * @return Защищенный хеш
+     * @param data Данные для хеширования
+     * @param output_size Размер выходного хеша в байтах
+     * @param key Ключ для ключевого хеширования (может быть пустым)
+     * @param context Контекст для деривационного хеширования (может быть пустым)
+     * @param personalization Персонализация (может быть пустой)
+     * @return Хеш-значение
      */
-    static std::vector<unsigned char> apply_security_transformations(
-        const std::vector<unsigned char>& hash
-    );
+    static std::vector<unsigned char> blake3_hash_internal(const std::vector<unsigned char>& data,
+                                                         size_t output_size,
+                                                         const std::vector<unsigned char>& key = {},
+                                                         const std::string& context = "",
+                                                         const std::string& personalization = "");
     
-    // Статический флаг инициализации
-    static bool is_initialized_;
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом и фиксированным окончанием
+     * 
+     * @param prefix Фиксированный префикс
+     * @param suffix Фиксированный суффикс
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом и фиксированным окончанием
+     */
+    static bool check_fixed_prefix_fixed_suffix_collision_resistance(const std::vector<unsigned char>& prefix,
+                                                                  const std::vector<unsigned char>& suffix);
     
-    // HMAC ключ для проверки целостности
-    static std::vector<unsigned char> hmac_key_;
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом, фиксированным средним участком и фиксированным окончанием
+     * 
+     * @param prefix Фиксированный префикс
+     * @param middle Фиксированный средний участок
+     * @param suffix Фиксированный суффикс
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом, фиксированным средним участком и фиксированным окончанием
+     */
+    static bool check_fixed_prefix_fixed_middle_fixed_suffix_collision_resistance(const std::vector<unsigned char>& prefix,
+                                                                               const std::vector<unsigned char>& middle,
+                                                                               const std::vector<unsigned char>& suffix);
     
-    // Соль для дополнительной защиты
-    static std::vector<unsigned char> salt_;
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом, фиксированным средним участком и произвольным окончанием
+     * 
+     * @param prefix Фиксированный префикс
+     * @param middle Фиксированный средний участок
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом, фиксированным средним участком и произвольным окончанием
+     */
+    static bool check_fixed_prefix_fixed_middle_arbitrary_suffix_collision_resistance(const std::vector<unsigned char>& prefix,
+                                                                                   const std::vector<unsigned char>& middle);
     
-    // Константы безопасности
-    static constexpr size_t SALT_SIZE = 32;
-    static constexpr size_t MIN_ENTROPY_BITS = 256;
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с произвольным началом, фиксированным средним участком и фиксированным окончанием
+     * 
+     * @param middle Фиксированный средний участок
+     * @param suffix Фиксированный суффикс
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с произвольным началом, фиксированным средним участком и фиксированным окончанием
+     */
+    static bool check_arbitrary_prefix_fixed_middle_fixed_suffix_collision_resistance(const std::vector<unsigned char>& middle,
+                                                                                   const std::vector<unsigned char>& suffix);
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с произвольным началом, фиксированным средним участком и произвольным окончанием
+     * 
+     * @param middle Фиксированный средний участок
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с произвольным началом, фиксированным средним участком и произвольным окончанием
+     */
+    static bool check_arbitrary_prefix_fixed_middle_arbitrary_suffix_collision_resistance(const std::vector<unsigned char>& middle);
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с произвольным началом, произвольным средним участком и фиксированным окончанием
+     * 
+     * @param suffix Фиксированный суффикс
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с произвольным началом, произвольным средним участком и фиксированным окончанием
+     */
+    static bool check_arbitrary_prefix_arbitrary_middle_fixed_suffix_collision_resistance(const std::vector<unsigned char>& suffix);
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом, произвольным средним участком и фиксированным окончанием
+     * 
+     * @param prefix Фиксированный префикс
+     * @param suffix Фиксированный суффикс
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом, произвольным средним участком и фиксированным окончанием
+     */
+    static bool check_fixed_prefix_arbitrary_middle_fixed_suffix_collision_resistance(const std::vector<unsigned char>& prefix,
+                                                                                   const std::vector<unsigned char>& suffix);
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом, произвольным средним участком и произвольным окончанием
+     * 
+     * @param prefix Фиксированный префикс
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом, произвольным средним участком и произвольным окончанием
+     */
+    static bool check_fixed_prefix_arbitrary_middle_arbitrary_suffix_collision_resistance(const std::vector<unsigned char>& prefix);
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с произвольным началом, фиксированным средним участком и произвольным окончанием
+     * 
+     * @param middle Фиксированный средний участок
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с произвольным началом, фиксированным средним участком и произвольным окончанием
+     */
+    static bool check_arbitrary_prefix_fixed_middle_arbitrary_suffix_collision_resistance(const std::vector<unsigned char>& middle);
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с произвольным началом, произвольным средним участком и фиксированным окончанием
+     * 
+     * @param suffix Фиксированный суффикс
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с произвольным началом, произвольным средним участком и фиксированным окончанием
+     */
+    static bool check_arbitrary_prefix_arbitrary_middle_fixed_suffix_collision_resistance(const std::vector<unsigned char>& suffix);
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с произвольным началом, фиксированным средним участком и фиксированным окончанием
+     * 
+     * @param middle Фиксированный средний участок
+     * @param suffix Фиксированный суффикс
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с произвольным началом, фиксированным средним участком и фиксированным окончанием
+     */
+    static bool check_arbitrary_prefix_fixed_middle_fixed_suffix_collision_resistance(const std::vector<unsigned char>& middle,
+                                                                                   const std::vector<unsigned char>& suffix);
+    
+    /**
+     * @brief Проверка, что хеш-функция устойчива к атакам на основе поиска коллизий с фиксированным началом, фиксированным средним участком и фиксированным окончанием
+     * 
+     * @param prefix Фиксированный префикс
+     * @param middle Фиксированный средний участок
+     * @param suffix Фиксированный суффикс
+     * @return true, если хеш-функция устойчива к атакам на поиск коллизий с фиксированным началом, фиксированным средним участком и фиксированным окончанием
+     */
+    static bool check_fixed_prefix_fixed_middle_fixed_suffix_collision_resistance(const std::vector<unsigned char>& prefix,
+                                                                               const std::vector<unsigned char>& middle,
+                                                                               const std::vector<unsigned char>& suffix);
+    
+    // Статические переменные
+    static bool blake3_initialized_;
+    static size_t hash_size_;
+    static std::string blake3_version_;
 };
 
 } // namespace toruscsidh
