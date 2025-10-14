@@ -176,6 +176,31 @@ public:
                             int radius = 1) const;
 
     /**
+     * @brief Проверка связи кривых через модулярные уравнения
+     * 
+     * Проверяет, что две кривые связаны изогенией заданной степени
+     * через проверку соответствующего модулярного уравнения.
+     * 
+     * @param base_curve Базовая кривая
+     * @param target_curve Целевая кривая
+     * @param prime Простое число, определяющее степень изогении
+     * @return true, если кривые связаны изогенией
+     */
+    bool verify_modular_connection(const MontgomeryCurve& base_curve,
+                                 const MontgomeryCurve& target_curve,
+                                 const GmpRaii& prime) const;
+    
+    /**
+     * @brief Проверка суперсингулярности кривой
+     * 
+     * Проверяет, является ли кривая суперсингулярной в данном поле.
+     * 
+     * @param curve Проверяемая кривая
+     * @return true, если кривая суперсингулярна
+     */
+    bool is_supersingular(const MontgomeryCurve& curve) const;
+    
+    /**
      * @brief Получить текущие параметры безопасности
      * @return Параметры безопасности
      */
@@ -228,12 +253,28 @@ private:
     Eigen::MatrixXd get_laplacian_matrix(const Graph& graph) const;
     
     /**
+     * @brief Вычислить коэффициент кластеризации
+     * 
+     * @param graph Граф для анализа
+     * @return Коэффициент кластеризации
+     */
+    double calculate_clustering_coefficient(const Graph& graph) const;
+    
+    /**
      * @brief Вычислить распределение степеней вершин
      * 
      * @param graph Граф для анализа
      * @return Вектор степеней вершин
      */
     std::vector<int> calculate_degree_distribution(const Graph& graph) const;
+    
+    /**
+     * @brief Вычислить энтропию распределения степеней
+     * 
+     * @param graph Граф для анализа
+     * @return Энтропия распределения
+     */
+    double calculate_degree_entropy(const Graph& graph) const;
     
     /**
      * @brief Вычислить диаметр подграфа
@@ -251,6 +292,78 @@ private:
      */
     bool is_tree(const Graph& graph) const;
     
+    /**
+     * @brief Проверка модулярного уравнения для изогении степени 3
+     * 
+     * @param j1 j-инвариант первой кривой
+     * @param j2 j-инвариант второй кривой
+     * @param p Характеристика поля
+     * @return true, если модулярное уравнение выполнено
+     */
+    bool verify_isogeny_degree_3(const GmpRaii& j1, const GmpRaii& j2, const GmpRaii& p) const;
+    
+    /**
+     * @brief Проверка модулярного уравнения для изогении степени 5
+     * 
+     * @param j1 j-инвариант первой кривой
+     * @param j2 j-инвариант второй кривой
+     * @param p Характеристика поля
+     * @return true, если модулярное уравнение выполнено
+     */
+    bool verify_isogeny_degree_5(const GmpRaii& j1, const GmpRaii& j2, const GmpRaii& p) const;
+    
+    /**
+     * @brief Проверка модулярного уравнения для изогении степени 7
+     * 
+     * @param j1 j-инвариант первой кривой
+     * @param j2 j-инвариант второй кривой
+     * @param p Характеристика поля
+     * @return true, если модулярное уравнение выполнено
+     */
+    bool verify_isogeny_degree_7(const GmpRaii& j1, const GmpRaii& j2, const GmpRaii& p) const;
+    
+    /**
+     * @brief Общая проверка модулярного уравнения для произвольной степени
+     * 
+     * @param j1 j-инвариант первой кривой
+     * @param j2 j-инвариант второй кривой
+     * @param degree Степень изогении
+     * @param p Характеристика поля
+     * @return true, если модулярное уравнение выполнено
+     */
+    bool verify_modular_equation(const GmpRaii& j1, const GmpRaii& j2,
+                               unsigned int degree, const GmpRaii& p) const;
+    
+    /**
+     * @brief Вычислить изогению степени 3
+     * 
+     * @param curve Базовая кривая
+     * @param kernel_point Точка ядра
+     * @return Новая кривая после изогении
+     */
+    MontgomeryCurve compute_isogeny_degree_3(const MontgomeryCurve& curve,
+                                          const EllipticCurvePoint& kernel_point) const;
+    
+    /**
+     * @brief Вычислить изогению степени 5
+     * 
+     * @param curve Базовая кривая
+     * @param kernel_point Точка ядра
+     * @return Новая кривая после изогении
+     */
+    MontgomeryCurve compute_isogeny_degree_5(const MontgomeryCurve& curve,
+                                          const EllipticCurvePoint& kernel_point) const;
+    
+    /**
+     * @brief Вычислить изогению степени 7
+     * 
+     * @param curve Базовая кривая
+     * @param kernel_point Точка ядра
+     * @return Новая кривая после изогении
+     */
+    MontgomeryCurve compute_isogeny_degree_7(const MontgomeryCurve& curve,
+                                          const EllipticCurvePoint& kernel_point) const;
+    
     // Параметры безопасности, зависящие от уровня защиты
     int security_bits_;
     std::vector<double> security_params_;
@@ -264,11 +377,23 @@ private:
     static constexpr double MIN_SPECTRAL_GAP_192 = 0.18;
     static constexpr double MIN_SPECTRAL_GAP_256 = 0.22;
     
+    static constexpr double MIN_CLUSTERING_COEFF_128 = 0.35;
+    static constexpr double MIN_CLUSTERING_COEFF_192 = 0.40;
+    static constexpr double MIN_CLUSTERING_COEFF_256 = 0.45;
+    
+    static constexpr double MIN_DEGREE_ENTROPY_128 = 0.75;
+    static constexpr double MIN_DEGREE_ENTROPY_192 = 0.80;
+    static constexpr double MIN_DEGREE_ENTROPY_256 = 0.85;
+    
     static constexpr double MAX_PATH_LENGTH_RATIO_128 = 0.75;
     static constexpr double MAX_PATH_LENGTH_RATIO_192 = 0.70;
     static constexpr double MAX_PATH_LENGTH_RATIO_256 = 0.65;
     
     static constexpr int MIN_DEGREE_MULTIPLIER = 2;
+    
+    static constexpr int GEOMETRIC_RADIUS_128 = 3;
+    static constexpr int GEOMETRIC_RADIUS_192 = 4;
+    static constexpr int GEOMETRIC_RADIUS_256 = 5;
 };
 
 } // namespace toruscsidh
