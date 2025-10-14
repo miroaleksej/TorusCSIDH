@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
+#include <cmath>
 #include "security_constants.h"
 #include "rfc6979_rng.h"
 
@@ -181,6 +182,13 @@ public:
      */
     static GmpRaii generate_weighted_random(const GmpRaii& max, double weight);
     
+    /**
+     * @brief Проверка, что операция выполняется за постоянное время
+     * 
+     * @return true, если операция выполняется за постоянное время
+     */
+    static bool is_constant_time();
+    
 private:
     /**
      * @brief Проверка инициализации libsodium
@@ -194,6 +202,26 @@ private:
      * @return Случайное число
      */
     static GmpRaii rejection_sampling(const GmpRaii& max);
+    
+    /**
+     * @brief Вычисление обратного элемента по модулю
+     * 
+     * @param a Число
+     * @param p Модуль
+     * @return Обратный элемент
+     */
+    static GmpRaii mod_inverse(const GmpRaii& a, const GmpRaii& p);
+    
+    /**
+     * @brief Расширенный алгоритм Евклида
+     * 
+     * @param a Первое число
+     * @param b Второе число
+     * @param g НОД
+     * @param x Коэффициент
+     * @param y Коэффициент
+     */
+    static void extended_gcd(const GmpRaii& a, const GmpRaii& b, GmpRaii& g, GmpRaii& x, GmpRaii& y);
     
     // Флаг инициализации
     static bool is_initialized_;
