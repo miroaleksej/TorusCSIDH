@@ -393,48 +393,6 @@ The isogeny graph is a concrete discrete structure, and in its local neighborhoo
 
 > **Next step—pilot with mining pool.** Who is ready to be the first?
 
-## References
-
-1. **De Feo, L., Jao, D., & Plût, J.** (2014).  
-   *Towards quantum-resistant cryptosystems from supersingular elliptic curve isogenies.*  
-   Journal of Mathematical Cryptology, 8(3), 209–247. DOI: [10.1515/jmc-2012-0015](https://doi.org/10.1515/jmc-2012-0015).
-
-2. **Castryck, W., & Decru, T.** (2022).  
-   *An efficient key recovery attack on SIDH.*  
-   IACR Cryptology ePrint Archive, Report 2022/975.
-
-3. **Beullens, W., Kleinjung, T., & Vercauteren, F.** (2019).  
-   *CSI-FiSh: Efficient isogeny based signatures through class group computations.*  
-   ASIACRYPT 2019.
-
-4. **Meyer, M., & Reith, S.** (2018).  
-   *A faster way to the CSIDH.*  
-   IACR ePrint 2017/1213.
-
-5. **Eisenträger, K., Hallgren, S., Lauter, K., Morrison, T., & Petit, C.** (2018).  
-   *Supersingular isogeny graphs and endomorphism rings: reductions and solutions.*  
-   EUROCRYPT 2018.
-
-6. **National Institute of Standards and Technology (NIST).** (2024).  
-   *Status Report on the Fourth Round of the NIST Post-Quantum Cryptography Standardization Process.*  
-   NIST IR 8545.
-
-7. **Wuille, P., & Maxwell, G.** (2017–2020).  
-   *BIP-173: Bech32 address format*,  
-   *BIP-350: Bech32m format for v1+ witness addresses*.
-
-8. **Chung, F. R. K.** (1997).  
-   *Spectral Graph Theory.*  
-   CBMS Regional Conference Series in Mathematics.
-
-9. **Mohar, B.** (1991).  
-   *The Laplacian spectrum of graphs.*  
-   In Graph Theory, Combinatorics, and Applications, pp. 871–898.
-
-10. **Kohel, D.** (1996).  
-    *Endomorphism rings of elliptic curves over finite fields.*  
-    PhD Thesis, UC Berkeley.
-
 > **Note**: The geometric layer (verification of local cyclicity through cyclomatic number and spectral gap) **has no direct analogues** in isogeny literature. It is inspired by graph theory methods but **applied for the first time** in the context of post-quantum cryptography on isogenies.
 
 ## Technical Appendix: Complete Geometric Verification Implementation
