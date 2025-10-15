@@ -310,6 +310,10 @@ const std::vector<short>& TorusCSIDH::get_private_key() const {
     return private_key_;
 }
 
+CodeIntegrityProtection& TorusCSIDH::get_code_integrity() {
+    return code_integrity_;
+}
+
 bool TorusCSIDH::verify_key_integrity() const {
     // Проверка "малости" ключа
     if (!is_small_key()) {
