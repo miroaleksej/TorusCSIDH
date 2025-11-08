@@ -4,6 +4,7 @@
 #include "utils/secure_utils.h"
 #include "utils/random.h"
 #include "utils/error_handling.h"
+#include "utils/cpu_features.h"
 
 #include <string.h>
 
@@ -11,40 +12,49 @@
 static void fp_add_impl(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx);
 static void fp_sub_impl(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx);
 static void fp_mul_impl(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx);
+static void fp_sqr_impl(fp* c, const fp* a, const fp_ctx_t* ctx);
 static void fp_reduce_impl(fp* a, const fp_ctx_t* ctx);
 static int fp_inv_fermat(fp* c, const fp* a, const fp_ctx_t* ctx);
 static int fp_sqrt_tonelli_shanks(fp* c, const fp* a, const fp_ctx_t* ctx);
+static int fp_sqrt_simple(fp* c, const fp* a, const fp_ctx_t* ctx);
+static void fp_div2(fp* c, const fp* a, const fp_ctx_t* ctx);
 
-int fp_ctx_init(fp_ctx_t* ctx, const fp* modulus) {
+int fp_ctx_init(fp_ctx_t* ctx, const fp* modulus, uint32_t security_level) {
     if (!ctx || !modulus) {
         return TORUS_ERROR_INVALID_PARAM;
     }
     
     // Copy modulus
     fp_copy(&ctx->modulus, modulus);
+    ctx->security_level = security_level;
     
-    // Precompute Montgomery constants
+    // Initialize Montgomery context
     if (montgomery_ctx_init(&ctx->montgomery_ctx, modulus) != TORUS_SUCCESS) {
         return TORUS_ERROR_COMPUTATION;
     }
     
-    // Precompute p - 2 for exponentiation
+    // Precompute p - 2 for exponentiation: a^(p-2) = a^(-1) mod p
     fp_set_one(&ctx->p_minus_2, ctx);
     fp_add(&ctx->p_minus_2, modulus, &ctx->p_minus_2, ctx); // p + 1
     fp_sub(&ctx->p_minus_2, &ctx->p_minus_2, &ctx->p_minus_2, ctx); // p - 2
     
-    // Precompute (p + 1) / 4 for square roots (if p ≡ 3 mod 4)
+    // Precompute (p + 1) / 4 for square roots (when p ≡ 3 mod 4)
     fp_set_u64(&ctx->p_plus_1_div_4, 1, ctx);
     fp_add(&ctx->p_plus_1_div_4, modulus, &ctx->p_plus_1_div_4, ctx); // p + 1
-    fp_set_u64(&ctx->temp, 4, ctx);
-    fp_inv(&ctx->temp, &ctx->temp, ctx); // 1/4
-    fp_mul(&ctx->p_plus_1_div_4, &ctx->p_plus_1_div_4, &ctx->temp, ctx); // (p + 1)/4
+    fp_div2(&ctx->p_plus_1_div_4, &ctx->p_plus_1_div_4, ctx); // (p + 1) / 2
+    fp_div2(&ctx->p_plus_1_div_4, &ctx->p_plus_1_div_4, ctx); // (p + 1) / 4
+    
+    // Initialize temporary storage
+    fp_set_zero(&ctx->temp, ctx);
     
     return TORUS_SUCCESS;
 }
 
 void fp_ctx_cleanup(fp_ctx_t* ctx) {
     if (!ctx) return;
+    
+    // Cleanup Montgomery context
+    montgomery_ctx_cleanup(&ctx->montgomery_ctx);
     
     // Securely zeroize all sensitive data
     secure_zeroize(ctx, sizeof(fp_ctx_t));
@@ -63,6 +73,33 @@ void fp_set_one(fp* a, const fp_ctx_t* ctx) {
     
     fp_set_zero(a);
     a->d[0] = 1;
+    fp_reduce(a, ctx);
+}
+
+void fp_set_u64(fp* a, uint64_t value, const fp_ctx_t* ctx) {
+    if (!a || !ctx) return;
+    
+    fp_set_zero(a);
+    a->d[0] = value;
+    fp_reduce(a, ctx);
+}
+
+void fp_set_bytes(fp* a, const uint8_t* bytes, const fp_ctx_t* ctx) {
+    if (!a || !bytes || !ctx) return;
+    
+    fp_set_zero(a);
+    
+    // Convert from big-endian bytes
+    size_t bytes_per_limb = sizeof(uint64_t);
+    for (size_t i = 0; i < NLIMBS; i++) {
+        for (size_t j = 0; j < bytes_per_limb; j++) {
+            size_t byte_index = (NLIMBS - 1 - i) * bytes_per_limb + j;
+            if (byte_index < FP_BYTES) {
+                a->d[i] |= ((uint64_t)bytes[byte_index]) << (8 * (bytes_per_limb - 1 - j));
+            }
+        }
+    }
+    
     fp_reduce(a, ctx);
 }
 
@@ -111,22 +148,37 @@ int fp_random(fp* a, const fp_ctx_t* ctx) {
         return TORUS_ERROR_INVALID_PARAM;
     }
     
-    // Generate random bytes
-    uint8_t random_bytes[NLIMBS * sizeof(uint64_t)];
+    uint8_t random_bytes[FP_BYTES];
     if (random_bytes_secure(random_bytes, sizeof(random_bytes)) != TORUS_SUCCESS) {
         return TORUS_ERROR_RANDOM;
     }
     
-    // Convert to limbs
-    for (size_t i = 0; i < NLIMBS; i++) {
-        a->d[i] = 0;
-        for (size_t j = 0; j < sizeof(uint64_t); j++) {
-            a->d[i] |= ((uint64_t)random_bytes[i * sizeof(uint64_t) + j]) << (j * 8);
-        }
+    fp_set_bytes(a, random_bytes, ctx);
+    
+    // Securely zeroize temporary buffer
+    secure_zeroize(random_bytes, sizeof(random_bytes));
+    
+    return TORUS_SUCCESS;
+}
+
+int fp_random_nonzero(fp* a, const fp_ctx_t* ctx) {
+    if (!a || !ctx) {
+        return TORUS_ERROR_INVALID_PARAM;
     }
     
-    // Ensure the value is less than modulus
-    fp_reduce(a, ctx);
+    int attempts = 0;
+    const int max_attempts = 100;
+    
+    do {
+        if (fp_random(a, ctx) != TORUS_SUCCESS) {
+            return TORUS_ERROR_RANDOM;
+        }
+        attempts++;
+    } while (fp_is_zero(a) && attempts < max_attempts);
+    
+    if (fp_is_zero(a)) {
+        return TORUS_ERROR_RANDOM;
+    }
     
     return TORUS_SUCCESS;
 }
@@ -158,7 +210,7 @@ static void fp_add_impl(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
         temp.d[i] = sum;
     }
     
-    // Subtract modulus if result >= modulus
+    // Check if result >= modulus
     uint64_t borrow = 0;
     fp reduced;
     for (size_t i = 0; i < NLIMBS; i++) {
@@ -168,7 +220,7 @@ static void fp_add_impl(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
         reduced.d[i] = diff;
     }
     
-    // Constant-time selection: use reduced if borrow == 0, else use temp
+    // Constant-time selection: use reduced if borrow == 0 (result >= modulus), else use temp
     uint64_t mask = ~(uint64_t)0 + !borrow; // mask = (borrow == 0) ? ~0 : 0
     for (size_t i = 0; i < NLIMBS; i++) {
         c->d[i] = (temp.d[i] & mask) | (reduced.d[i] & ~mask);
@@ -176,6 +228,18 @@ static void fp_add_impl(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
 }
 
 void fp_sub(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
+#if defined(__AVX2__)
+    if (cpu_has_avx2()) {
+        fp_sub_avx2(c, a, b, ctx);
+        return;
+    }
+#elif defined(__ARM_NEON)
+    if (cpu_has_neon()) {
+        fp_sub_neon(c, a, b, ctx);
+        return;
+    }
+#endif
+    
     uint64_t borrow = 0;
     fp temp;
     
@@ -225,8 +289,24 @@ static void fp_mul_impl(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
 }
 
 void fp_sqr(fp* c, const fp* a, const fp_ctx_t* ctx) {
+#if defined(__AVX2__)
+    if (cpu_has_avx2()) {
+        fp_sqr_avx2(c, a, ctx);
+        return;
+    }
+#elif defined(__ARM_NEON)
+    if (cpu_has_neon()) {
+        fp_sqr_neon(c, a, ctx);
+        return;
+    }
+#endif
+    
+    fp_sqr_impl(c, a, ctx);
+}
+
+static void fp_sqr_impl(fp* c, const fp* a, const fp_ctx_t* ctx) {
     // Square is just multiplication with itself
-    fp_mul(c, a, a, ctx);
+    fp_mul_impl(c, a, a, ctx);
 }
 
 int fp_inv(fp* c, const fp* a, const fp_ctx_t* ctx) {
@@ -246,17 +326,19 @@ static int fp_inv_fermat(fp* c, const fp* a, const fp_ctx_t* ctx) {
     fp result;
     fp_set_one(&result, ctx);
     
-    fp base = *a;
-    fp exponent = ctx->p_minus_2;
+    fp base;
+    fp_copy(&base, a);
+    fp exponent;
+    fp_copy(&exponent, &ctx->p_minus_2);
     
     // Square-and-multiply exponentiation (constant-time)
-    for (int i = FP_BITS - 1; i >= 0; i--) {
+    uint32_t total_bits = fp_get_bits(ctx);
+    
+    for (int i = total_bits - 1; i >= 0; i--) {
         fp_sqr(&result, &result, ctx);
         
         // Get bit i of exponent
-        int limb_idx = i / 64;
-        int bit_idx = i % 64;
-        uint64_t bit = (exponent.d[limb_idx] >> bit_idx) & 1;
+        uint8_t bit = fp_get_bit(&exponent, i, ctx);
         
         // Conditional multiplication
         fp temp;
@@ -289,17 +371,19 @@ void fp_pow(fp* c, const fp* a, const fp* e, const fp_ctx_t* ctx) {
     fp result;
     fp_set_one(&result, ctx);
     
-    fp base = *a;
-    fp exponent = *e;
+    fp base;
+    fp_copy(&base, a);
+    fp exponent;
+    fp_copy(&exponent, e);
     
     // Square-and-multiply exponentiation (constant-time)
-    for (int i = FP_BITS - 1; i >= 0; i--) {
+    uint32_t total_bits = fp_get_bits(ctx);
+    
+    for (int i = total_bits - 1; i >= 0; i--) {
         fp_sqr(&result, &result, ctx);
         
         // Get bit i of exponent
-        int limb_idx = i / 64;
-        int bit_idx = i % 64;
-        uint64_t bit = (exponent.d[limb_idx] >> bit_idx) & 1;
+        uint8_t bit = fp_get_bit(&exponent, i, ctx);
         
         // Conditional multiplication
         fp temp;
@@ -314,7 +398,35 @@ void fp_pow(fp* c, const fp* a, const fp* e, const fp_ctx_t* ctx) {
     // Securely zeroize temporary values
     secure_zeroize(&result, sizeof(result));
     secure_zeroize(&base, sizeof(base));
+    secure_zeroize(&exponent, sizeof(exponent));
     secure_zeroize(&temp, sizeof(temp));
+}
+
+void fp_pow_u64(fp* c, const fp* a, uint64_t exponent, const fp_ctx_t* ctx) {
+    if (!c || !a || !ctx) return;
+    
+    fp result;
+    fp_set_one(&result, ctx);
+    
+    fp base;
+    fp_copy(&base, a);
+    
+    uint64_t exp = exponent;
+    
+    // Square-and-multiply exponentiation (constant-time)
+    while (exp > 0) {
+        if (exp & 1) {
+            fp_mul(&result, &result, &base, ctx);
+        }
+        fp_sqr(&base, &base, ctx);
+        exp >>= 1;
+    }
+    
+    fp_copy(c, &result);
+    
+    // Securely zeroize temporary values
+    secure_zeroize(&result, sizeof(result));
+    secure_zeroize(&base, sizeof(base));
 }
 
 void fp_reduce(fp* a, const fp_ctx_t* ctx) {
@@ -322,7 +434,7 @@ void fp_reduce(fp* a, const fp_ctx_t* ctx) {
 }
 
 static void fp_reduce_impl(fp* a, const fp_ctx_t* ctx) {
-    // Check if a >= modulus
+    // Check if a >= modulus using constant-time comparison
     uint64_t borrow = 0;
     for (size_t i = 0; i < NLIMBS; i++) {
         uint64_t diff = a->d[i] - ctx->modulus.d[i] - borrow;
@@ -354,14 +466,18 @@ int fp_is_square(const fp* a, const fp_ctx_t* ctx) {
     fp_set_one(&exponent, ctx);
     fp_add(&exponent, &ctx->modulus, &exponent, ctx); // p + 1
     fp_sub(&exponent, &exponent, &exponent, ctx); // p - 1
-    fp_set_u64(&ctx->temp, 2, ctx);
-    fp_inv(&ctx->temp, &ctx->temp, ctx); // 1/2
-    fp_mul(&exponent, &exponent, &ctx->temp, ctx); // (p - 1)/2
+    fp_div2(&exponent, &exponent, ctx); // (p - 1) / 2
     
     fp result;
     fp_pow(&result, a, &exponent, ctx);
     
-    return fp_is_one(&result, ctx);
+    int is_square = fp_is_one(&result, ctx);
+    
+    // Securely zeroize temporary values
+    secure_zeroize(&exponent, sizeof(exponent));
+    secure_zeroize(&result, sizeof(result));
+    
+    return is_square;
 }
 
 int fp_sqrt(fp* c, const fp* a, const fp_ctx_t* ctx) {
@@ -379,24 +495,49 @@ int fp_sqrt(fp* c, const fp* a, const fp_ctx_t* ctx) {
         return TORUS_ERROR_NOT_QUADRATIC_RESIDUE;
     }
     
-    // Use Tonelli-Shanks algorithm for general case
+    // For primes p ≡ 3 mod 4, use simple formula: sqrt(a) = a^{(p+1)/4}
+    // Check if modulus is 3 mod 4
+    if ((ctx->modulus.d[0] & 3) == 3) {
+        return fp_sqrt_simple(c, a, ctx);
+    }
+    
+    // Otherwise use Tonelli-Shanks algorithm for general case
     return fp_sqrt_tonelli_shanks(c, a, ctx);
+}
+
+static int fp_sqrt_simple(fp* c, const fp* a, const fp_ctx_t* ctx) {
+    // For p ≡ 3 mod 4: sqrt(a) = a^{(p+1)/4} mod p
+    fp_pow(c, a, &ctx->p_plus_1_div_4, ctx);
+    
+    // Verify the result
+    fp check;
+    fp_sqr(&check, c, ctx);
+    
+    int correct = fp_equal(&check, a);
+    
+    // Securely zeroize temporary value
+    secure_zeroize(&check, sizeof(check));
+    
+    if (!correct) {
+        return TORUS_ERROR_COMPUTATION;
+    }
+    
+    return TORUS_SUCCESS;
 }
 
 static int fp_sqrt_tonelli_shanks(fp* c, const fp* a, const fp_ctx_t* ctx) {
     // Factor p - 1 = Q * 2^S
-    fp q = ctx->modulus;
-    fp_set_one(&q, ctx);
-    fp_sub(&q, &q, &q, ctx); // q = p - 1
+    fp q;
+    fp_copy(&q, &ctx->modulus);
+    fp_set_one(&ctx->temp, ctx);
+    fp_sub(&q, &q, &ctx->temp, ctx); // q = p - 1
     
     uint64_t s = 0;
     fp temp = q;
     
     // Count factors of 2: while temp is even
     while ((temp.d[0] & 1) == 0) {
-        fp_set_u64(&ctx->temp, 2, ctx);
-        fp_inv(&ctx->temp, &ctx->temp, ctx); // 1/2
-        fp_mul(&temp, &temp, &ctx->temp, ctx);
+        fp_div2(&temp, &temp, ctx);
         s++;
     }
     
@@ -404,27 +545,28 @@ static int fp_sqrt_tonelli_shanks(fp* c, const fp* a, const fp_ctx_t* ctx) {
     fp z;
     fp_set_one(&z, ctx);
     do {
-        fp_add(&z, &z, &ctx->montgomery_ctx.one, ctx); // z = z + 1
+        fp_add(&z, &z, &ctx->temp, ctx); // z = z + 1
     } while (fp_is_square(&z, ctx));
     
     // Initialize variables
-    fp m = {0};
+    fp m;
     fp_set_u64(&m, s, ctx);
     
-    fp c_val = {0};
+    fp c_val;
     fp_pow(&c_val, &z, &q, ctx);
     
-    fp t = {0};
+    fp t;
     fp_pow(&t, a, &q, ctx);
     
-    fp r = {0};
+    fp r;
     fp_set_u64(&ctx->temp, (q.d[0] + 1) >> 1, ctx);
     fp_pow(&r, a, &ctx->temp, ctx);
     
     // Main loop
     while (!fp_is_one(&t, ctx)) {
         uint64_t i = 0;
-        fp t2i = t;
+        fp t2i;
+        fp_copy(&t2i, &t);
         
         // Find smallest i such that t^{2^i} = 1
         while (!fp_is_one(&t2i, ctx)) {
@@ -436,7 +578,9 @@ static int fp_sqrt_tonelli_shanks(fp* c, const fp* a, const fp_ctx_t* ctx) {
         }
         
         // Update values
-        fp b = c_val;
+        fp b;
+        fp_set_u64(&ctx->temp, 1, ctx);
+        fp_pow(&b, &c_val, &ctx->temp, ctx); // b = c_val^(2^(s-i-1))
         for (uint64_t j = 0; j < s - i - 1; j++) {
             fp_sqr(&b, &b, ctx);
         }
@@ -449,6 +593,28 @@ static int fp_sqrt_tonelli_shanks(fp* c, const fp* a, const fp_ctx_t* ctx) {
     }
     
     fp_copy(c, &r);
+    
+    // Verify the result
+    fp check;
+    fp_sqr(&check, c, ctx);
+    int correct = fp_equal(&check, a);
+    
+    // Securely zeroize temporary values
+    secure_zeroize(&q, sizeof(q));
+    secure_zeroize(&temp, sizeof(temp));
+    secure_zeroize(&z, sizeof(z));
+    secure_zeroize(&m, sizeof(m));
+    secure_zeroize(&c_val, sizeof(c_val));
+    secure_zeroize(&t, sizeof(t));
+    secure_zeroize(&r, sizeof(r));
+    secure_zeroize(&t2i, sizeof(t2i));
+    secure_zeroize(&b, sizeof(b));
+    secure_zeroize(&check, sizeof(check));
+    
+    if (!correct) {
+        return TORUS_ERROR_COMPUTATION;
+    }
+    
     return TORUS_SUCCESS;
 }
 
@@ -458,6 +624,57 @@ void fp_to_montgomery(fp* c, const fp* a, const fp_ctx_t* ctx) {
 
 void fp_from_montgomery(fp* c, const fp* a, const fp_ctx_t* ctx) {
     montgomery_from_montgomery(c, a, &ctx->montgomery_ctx);
+}
+
+void fp_to_bytes(uint8_t* bytes, const fp* a, const fp_ctx_t* ctx) {
+    if (!bytes || !a || !ctx) return;
+    
+    // Convert to canonical form first
+    fp canonical;
+    fp_copy(&canonical, a);
+    fp_reduce(&canonical, ctx);
+    
+    // Convert to big-endian bytes
+    size_t bytes_per_limb = sizeof(uint64_t);
+    for (size_t i = 0; i < NLIMBS; i++) {
+        for (size_t j = 0; j < bytes_per_limb; j++) {
+            size_t byte_index = (NLIMBS - 1 - i) * bytes_per_limb + j;
+            if (byte_index < FP_BYTES) {
+                bytes[byte_index] = (canonical.d[i] >> (8 * (bytes_per_limb - 1 - j))) & 0xFF;
+            }
+        }
+    }
+    
+    // Securely zeroize temporary value
+    secure_zeroize(&canonical, sizeof(canonical));
+}
+
+int fp_from_bytes(fp* a, const uint8_t* bytes, const fp_ctx_t* ctx) {
+    if (!a || !bytes || !ctx) return TORUS_ERROR_INVALID_PARAM;
+    
+    fp_set_bytes(a, bytes, ctx);
+    
+    // Check if the value is less than modulus
+    if (!fp_is_canonical(a, ctx)) {
+        return TORUS_ERROR_INVALID_PARAM;
+    }
+    
+    return TORUS_SUCCESS;
+}
+
+int fp_is_canonical(const fp* a, const fp_ctx_t* ctx) {
+    if (!a || !ctx) return 0;
+    
+    // Check if a < modulus using constant-time comparison
+    uint64_t borrow = 0;
+    for (size_t i = 0; i < NLIMBS; i++) {
+        uint64_t diff = a->d[i] - ctx->modulus.d[i] - borrow;
+        borrow = (a->d[i] < ctx->modulus.d[i] + borrow) || 
+                (borrow && (a->d[i] == ctx->modulus.d[i] + borrow));
+    }
+    
+    // If borrow == 1, then a < modulus (canonical)
+    return (borrow == 1);
 }
 
 void fp_cmov(fp* dst, const fp* src, uint8_t condition) {
@@ -484,6 +701,69 @@ void fp_cswap(fp* a, fp* b, uint8_t condition) {
     }
 }
 
+uint8_t fp_get_bit(const fp* a, uint32_t bit_index, const fp_ctx_t* ctx) {
+    if (!a || !ctx) return 0;
+    
+    uint32_t limb_index = bit_index / 64;
+    uint32_t bit_in_limb = bit_index % 64;
+    
+    if (limb_index >= NLIMBS) {
+        return 0;
+    }
+    
+    return (a->d[limb_index] >> bit_in_limb) & 1;
+}
+
+uint32_t fp_get_bits(const fp_ctx_t* ctx) {
+    if (!ctx) return 0;
+    
+    // Count the number of bits in the modulus
+    uint32_t bits = 0;
+    for (int i = NLIMBS - 1; i >= 0; i--) {
+        if (ctx->modulus.d[i] != 0) {
+            bits = (i + 1) * 64 - __builtin_clzll(ctx->modulus.d[i]);
+            break;
+        }
+    }
+    
+    return bits;
+}
+
+uint32_t fp_get_bytes(const fp_ctx_t* ctx) {
+    if (!ctx) return 0;
+    
+    uint32_t bits = fp_get_bits(ctx);
+    return (bits + 7) / 8;
+}
+
+static void fp_div2(fp* c, const fp* a, const fp_ctx_t* ctx) {
+    if (!c || !a || !ctx) return;
+    
+    // Check if a is even
+    uint8_t is_even = (a->d[0] & 1) == 0;
+    
+    // Divide by 2
+    uint64_t carry = 0;
+    for (int i = NLIMBS - 1; i >= 0; i--) {
+        uint64_t new_carry = (a->d[i] & 1) ? (1ULL << 63) : 0;
+        c->d[i] = (a->d[i] >> 1) | carry;
+        carry = new_carry;
+    }
+    
+    // If a was odd, add (p+1)/2
+    if (!is_even) {
+        fp half_p;
+        fp_copy(&half_p, &ctx->modulus);
+        fp_div2(&half_p, &half_p, ctx); // p/2
+        fp_add(&half_p, &half_p, &ctx->temp, ctx); // (p+1)/2
+        
+        fp_add(c, c, &half_p, ctx);
+        
+        // Securely zeroize temporary value
+        secure_zeroize(&half_p, sizeof(half_p));
+    }
+}
+
 // AVX2 optimized versions
 #ifdef __AVX2__
 #include <immintrin.h>
@@ -501,10 +781,27 @@ void fp_add_avx2(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
     fp_reduce_impl(c, ctx);
 }
 
+void fp_sub_avx2(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
+    // Process 4 limbs at a time with AVX2
+    for (size_t i = 0; i < NLIMBS; i += 4) {
+        __m256i a_vec = _mm256_loadu_si256((__m256i*)&a->d[i]);
+        __m256i b_vec = _mm256_loadu_si256((__m256i*)&b->d[i]);
+        __m256i diff = _mm256_sub_epi64(a_vec, b_vec);
+        _mm256_storeu_si256((__m256i*)&c->d[i], diff);
+    }
+    
+    // Still need modular reduction
+    fp_reduce_impl(c, ctx);
+}
+
 void fp_mul_avx2(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
     // Fall back to standard implementation for now
     // AVX2 Montgomery multiplication would be more complex
     fp_mul_impl(c, a, b, ctx);
+}
+
+void fp_sqr_avx2(fp* c, const fp* a, const fp_ctx_t* ctx) {
+    fp_sqr_impl(c, a, ctx);
 }
 #endif
 
@@ -525,8 +822,25 @@ void fp_add_neon(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
     fp_reduce_impl(c, ctx);
 }
 
+void fp_sub_neon(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
+    // Process 2 limbs at a time with NEON
+    for (size_t i = 0; i < NLIMBS; i += 2) {
+        uint64x2_t a_vec = vld1q_u64(&a->d[i]);
+        uint64x2_t b_vec = vld1q_u64(&b->d[i]);
+        uint64x2_t diff = vsubq_u64(a_vec, b_vec);
+        vst1q_u64(&c->d[i], diff);
+    }
+    
+    // Still need modular reduction
+    fp_reduce_impl(c, ctx);
+}
+
 void fp_mul_neon(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
     // Fall back to standard implementation
     fp_mul_impl(c, a, b, ctx);
+}
+
+void fp_sqr_neon(fp* c, const fp* a, const fp_ctx_t* ctx) {
+    fp_sqr_impl(c, a, ctx);
 }
 #endif
