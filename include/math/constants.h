@@ -1,4 +1,4 @@
-// src/math/constants.h
+// include/math/constants.h
 #ifndef TORUS_CONSTANTS_H
 #define TORUS_CONSTANTS_H
 
