@@ -1,4 +1,4 @@
-// src/math/modular_reduction.h
+// include/math/modular_reduction.h
 #ifndef MODULAR_REDUCTION_H
 #define MODULAR_REDUCTION_H
 
