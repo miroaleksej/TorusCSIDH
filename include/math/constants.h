@@ -30,9 +30,9 @@ extern "C" {
  * @brief Security level enumeration
  */
 typedef enum {
-    TORUS_SECURITY_128 = 128,  ///< 128-bit security level
-    TORUS_SECURITY_192 = 192,  ///< 192-bit security level  
-    TORUS_SECURITY_256 = 256,  ///< 256-bit security level
+    TORUS_SECURITY_128 = 128,  ///< 128-bit security level (CSIDH-512)
+    TORUS_SECURITY_192 = 192,  ///< 192-bit security level (CSIDH-768)
+    TORUS_SECURITY_256 = 256,  ///< 256-bit security level (CSIDH-1024)
     TORUS_SECURITY_512 = 512   ///< 512-bit security level (future use)
 } security_level_t;
 
@@ -166,7 +166,7 @@ typedef struct {
     fp2 A_plus_2C;                 ///< Precomputed A + 2C
     fp2 four_C;                    ///< Precomputed 4C
     fp cofactor;                   ///< Curve cofactor
-    uint32_t security_level;       ///< Security level
+    security_level_t security_level; ///< Security level
 } curve_constants_t;
 
 /**
@@ -331,7 +331,7 @@ TORUS_API extern const fp2 FP2_MINUS_I;    ///< -i in Fp2
  * @brief Get fundamental constant as fp2 element
  * 
  * @param value The constant value (0, 1, 2, etc.)
- * @return const fp2_t* Constant as fp2 element
+ * @return const fp2* Constant as fp2 element
  */
 TORUS_API const fp2* get_fp2_constant(uint64_t value);
 
