@@ -4,6 +4,7 @@
 
 #include "torus_common.h"
 #include "fp_types.h"
+#include "math/montgomery.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,15 +21,28 @@ extern "C" {
  */
 
 /**
+ * @brief Finite field context structure
+ */
+typedef struct {
+    fp modulus;                    ///< Prime modulus
+    montgomery_ctx_t montgomery_ctx; ///< Montgomery multiplication context
+    fp p_minus_2;                 ///< Precomputed p - 2 for exponentiation
+    fp p_plus_1_div_4;            ///< Precomputed (p + 1) / 4 for square roots
+    fp temp;                      ///< Temporary storage for computations
+    uint32_t security_level;      ///< Security level parameter
+} fp_ctx_t;
+
+/**
  * @brief Initialize finite field context
  * 
  * @param ctx Field context to initialize
  * @param modulus Prime modulus
+ * @param security_level Security level parameter
  * @return TORUS_SUCCESS on success, error code on failure
  * 
  * @security This function does not handle secret data
  */
-TORUS_API int fp_ctx_init(fp_ctx_t* ctx, const fp* modulus);
+TORUS_API int fp_ctx_init(fp_ctx_t* ctx, const fp* modulus, uint32_t security_level);
 
 /**
  * @brief Cleanup finite field context
@@ -57,6 +71,28 @@ TORUS_API void fp_set_zero(fp* a);
  * @security Constant-time execution
  */
 TORUS_API void fp_set_one(fp* a, const fp_ctx_t* ctx);
+
+/**
+ * @brief Set finite field element from 64-bit unsigned integer
+ * 
+ * @param a Element to set
+ * @param value 64-bit unsigned integer value
+ * @param ctx Field context
+ * 
+ * @security Constant-time execution
+ */
+TORUS_API void fp_set_u64(fp* a, uint64_t value, const fp_ctx_t* ctx);
+
+/**
+ * @brief Set finite field element from bytes (big-endian)
+ * 
+ * @param a Element to set
+ * @param bytes Input byte array (big-endian)
+ * @param ctx Field context
+ * 
+ * @security Constant-time execution
+ */
+TORUS_API void fp_set_bytes(fp* a, const uint8_t* bytes, const fp_ctx_t* ctx);
 
 /**
  * @brief Check if finite field element is zero
@@ -110,6 +146,17 @@ TORUS_API void fp_copy(fp* dst, const fp* src);
  * @security Uses cryptographically secure RNG
  */
 TORUS_API int fp_random(fp* a, const fp_ctx_t* ctx);
+
+/**
+ * @brief Generate random non-zero finite field element
+ * 
+ * @param a Element to generate
+ * @param ctx Field context
+ * @return TORUS_SUCCESS on success, error code on failure
+ * 
+ * @security Uses cryptographically secure RNG
+ */
+TORUS_API int fp_random_nonzero(fp* a, const fp_ctx_t* ctx);
 
 /**
  * @brief Modular addition: c = a + b mod p
@@ -194,6 +241,18 @@ TORUS_API void fp_neg(fp* c, const fp* a, const fp_ctx_t* ctx);
 TORUS_API void fp_pow(fp* c, const fp* a, const fp* e, const fp_ctx_t* ctx);
 
 /**
+ * @brief Modular exponentiation with unsigned integer exponent
+ * 
+ * @param c Result element
+ * @param a Base element
+ * @param exponent Unsigned integer exponent
+ * @param ctx Field context
+ * 
+ * @security Constant-time execution
+ */
+TORUS_API void fp_pow_u64(fp* c, const fp* a, uint64_t exponent, const fp_ctx_t* ctx);
+
+/**
  * @brief Modular reduction: a = a mod p
  * 
  * @param a Element to reduce
@@ -249,6 +308,40 @@ TORUS_API void fp_to_montgomery(fp* c, const fp* a, const fp_ctx_t* ctx);
 TORUS_API void fp_from_montgomery(fp* c, const fp* a, const fp_ctx_t* ctx);
 
 /**
+ * @brief Serialize finite field element to bytes (big-endian)
+ * 
+ * @param bytes Output byte array (must be at least FP_BYTES)
+ * @param a Element to serialize
+ * @param ctx Field context
+ * 
+ * @security Constant-time execution
+ */
+TORUS_API void fp_to_bytes(uint8_t* bytes, const fp* a, const fp_ctx_t* ctx);
+
+/**
+ * @brief Deserialize finite field element from bytes (big-endian)
+ * 
+ * @param a Element to store result
+ * @param bytes Input byte array (big-endian)
+ * @param ctx Field context
+ * @return TORUS_SUCCESS on success, error code on failure
+ * 
+ * @security Constant-time execution
+ */
+TORUS_API int fp_from_bytes(fp* a, const uint8_t* bytes, const fp_ctx_t* ctx);
+
+/**
+ * @brief Check if element is in canonical form (reduced modulo p)
+ * 
+ * @param a Element to check
+ * @param ctx Field context
+ * @return 1 if canonical, 0 otherwise
+ * 
+ * @security Constant-time execution
+ */
+TORUS_API int fp_is_canonical(const fp* a, const fp_ctx_t* ctx);
+
+/**
  * @brief Conditional move: dst = src if condition is true
  * 
  * @param dst Destination element
@@ -270,15 +363,47 @@ TORUS_API void fp_cmov(fp* dst, const fp* src, uint8_t condition);
  */
 TORUS_API void fp_cswap(fp* a, fp* b, uint8_t condition);
 
+/**
+ * @brief Get bit at specified position (constant-time)
+ * 
+ * @param a Element to get bit from
+ * @param bit_index Bit index (0 = least significant bit)
+ * @param ctx Field context
+ * @return 0 or 1 (the bit value)
+ * 
+ * @security Constant-time execution
+ */
+TORUS_API uint8_t fp_get_bit(const fp* a, uint32_t bit_index, const fp_ctx_t* ctx);
+
+/**
+ * @brief Get number of bits in the modulus
+ * 
+ * @param ctx Field context
+ * @return Number of bits in modulus
+ */
+TORUS_API uint32_t fp_get_bits(const fp_ctx_t* ctx);
+
+/**
+ * @brief Get number of bytes needed to represent modulus
+ * 
+ * @param ctx Field context
+ * @return Number of bytes
+ */
+TORUS_API uint32_t fp_get_bytes(const fp_ctx_t* ctx);
+
 // Optimized versions for specific architectures
 #ifdef __AVX2__
 TORUS_API void fp_add_avx2(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx);
+TORUS_API void fp_sub_avx2(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx);
 TORUS_API void fp_mul_avx2(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx);
+TORUS_API void fp_sqr_avx2(fp* c, const fp* a, const fp_ctx_t* ctx);
 #endif
 
 #ifdef __ARM_NEON
 TORUS_API void fp_add_neon(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx);
+TORUS_API void fp_sub_neon(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx);
 TORUS_API void fp_mul_neon(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx);
+TORUS_API void fp_sqr_neon(fp* c, const fp* a, const fp_ctx_t* ctx);
 #endif
 
 #ifdef __cplusplus
