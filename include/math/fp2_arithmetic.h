@@ -39,6 +39,7 @@ typedef struct {
     fp_ctx_t fp_ctx;           ///< Base field context
     fp2 non_residue;          ///< Non-residue for Fp2 construction
     uint32_t security_level;  ///< Security level parameter
+    uint8_t p_mod_4_is_3;    ///< Flag indicating if p ≡ 3 mod 4
 } fp2_ctx_t;
 
 /**
