@@ -1,266 +1,69 @@
-/**
- * @file fp_arithmetic.c
- * @brief Реализация арифметики в конечном поле Fp
- * 
- * Constant-time реализация арифметических операций в конечном поле Fp
- * для системы TorusCSIDH. Все операции защищены от атак по побочным каналам.
- */
+// src/math/fp_arithmetic.c
+#include "math/fp_arithmetic.h"
+#include "math/montgomery.h"
+#include "utils/secure_utils.h"
+#include "utils/random.h"
+#include "utils/error_handling.h"
 
-#include "math/fp.h"
 #include <string.h>
-#include <stdlib.h>
-#include <time.h>
-#include <openssl/rand.h>
 
-// Вспомогательные макросы для constant-time операций
+// Internal function declarations
+static void fp_add_impl(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx);
+static void fp_sub_impl(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx);
+static void fp_mul_impl(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx);
+static void fp_reduce_impl(fp* a, const fp_ctx_t* ctx);
+static int fp_inv_fermat(fp* c, const fp* a, const fp_ctx_t* ctx);
+static int fp_sqrt_tonelli_shanks(fp* c, const fp* a, const fp_ctx_t* ctx);
 
-/**
- * @brief Constant-time выбор между двумя значениями
- * 
- * @param condition Условие (0 или 1)
- * @param true_val Значение при истинном условии
- * @param false_val Значение при ложном условии
- * @return true_val если condition != 0, иначе false_val
- */
-#define CT_SELECT(condition, true_val, false_val) \
-    ((condition) ? (true_val) : (false_val))
-
-/**
- * @brief Constant-time максимум двух значений
- * 
- * @param a Первое значение
- * @param b Второе значение
- * @return Максимум из a и b
- */
-#define CT_MAX(a, b) \
-    ((a) ^ (((a) ^ (b)) & -((a) < (b))))
-
-/**
- * @brief Constant-time минимум двух значений
- * 
- * @param a Первое значение
- * @param b Второе значение
- * @return Минимум из a и b
- */
-#define CT_MIN(a, b) \
-    ((a) ^ (((a) ^ (b)) & -((a) > (b))))
-
-// Внутренние вспомогательные функции
-
-/**
- * @brief Низкоуровневое сложение двух многоразрядных чисел
- * 
- * @param[out] result Результат сложения
- * @param[in] a Первое слагаемое
- * @param[in] b Второе слагаемое
- * @param[in] num_limbs Количество лимбов
- * @return Перенос из старшего разряда
- * 
- * @note Constant-time операция
- */
-static uint64_t ct_add_limbs(uint64_t* result, const uint64_t* a, const uint64_t* b, size_t num_limbs) {
-    uint64_t carry = 0;
-    for (size_t i = 0; i < num_limbs; i++) {
-        // Используем 128-битную арифметику для вычисления переноса
-        __uint128_t sum = (__uint128_t)a[i] + b[i] + carry;
-        result[i] = (uint64_t)sum;
-        carry = (uint64_t)(sum >> 64);
-    }
-    return carry;
-}
-
-/**
- * @brief Низкоуровневое вычитание двух многоразрядных чисел
- * 
- * @param[out] result Результат вычитания
- * @param[in] a Уменьшаемое
- * @param[in] b Вычитаемое
- * @param[in] num_limbs Количество лимбов
- * @return 1 если был заим borrow, 0 иначе
- * 
- * @note Constant-time операция
- */
-static uint64_t ct_sub_limbs(uint64_t* result, const uint64_t* a, const uint64_t* b, size_t num_limbs) {
-    uint64_t borrow = 0;
-    for (size_t i = 0; i < num_limbs; i++) {
-        __uint128_t diff = (__uint128_t)a[i] - b[i] - borrow;
-        result[i] = (uint64_t)diff;
-        borrow = (diff >> 64) & 1;
-    }
-    return borrow;
-}
-
-/**
- * @brief Сравнение двух многоразрядных чисел
- * 
- * @param[in] a Первое число
- * @param[in] b Второе число
- * @param[in] num_limbs Количество лимбов
- * @return -1 если a < b, 0 если a = b, 1 если a > b
- * 
- * @note Constant-time операция
- */
-static int ct_cmp_limbs(const uint64_t* a, const uint64_t* b, size_t num_limbs) {
-    int result = 0;
-    for (size_t i = num_limbs; i > 0; i--) {
-        size_t idx = i - 1;
-        result = (a[idx] > b[idx]) - (a[idx] < b[idx]);
-        if (result != 0) break;
-    }
-    return result;
-}
-
-/**
- * @brief Montgomery reduction для одного шага
- * 
- * @param[in,out] t Промежуточный результат (размер 2*NLIMBS)
- * @param[in] m Множитель для Montgomery reduction
- * @param[in] modulus Модуль
- * @param[in] num_limbs Количество лимбов
- * 
- * @note Constant-time операция
- */
-static void montgomery_step(uint64_t* t, uint64_t m, const uint64_t* modulus, size_t num_limbs) {
-    uint64_t carry = 0;
-    for (size_t j = 0; j < num_limbs; j++) {
-        __uint128_t product = (__uint128_t)m * modulus[j] + t[j] + carry;
-        t[j] = (uint64_t)product;
-        carry = (uint64_t)(product >> 64);
-    }
-    // Распространение переноса в старшие разряды
-    for (size_t j = num_limbs; j < 2 * num_limbs; j++) {
-        __uint128_t sum = (__uint128_t)t[j] + carry;
-        t[j] = (uint64_t)sum;
-        carry = (uint64_t)(sum >> 64);
-        if (carry == 0) break;
-    }
-}
-
-/**
- * @brief Модульное сокращение с проверкой знака
- * 
- * @param[out] r Результат сокращения
- * @param[in] a Исходное число (может быть отрицательным)
- * @param[in] ctx Контекст арифметики
- * @param[in] is_negative Флаг отрицательного числа
- * 
- * @note Constant-time операция
- */
-static void ct_mod_reduce(fp* r, const fp* a, const fp_ctx* ctx, int is_negative) {
-    fp temp, reduced;
-    uint64_t borrow;
-    
-    if (is_negative) {
-        // Для отрицательных чисел: r = p - |a| mod p
-        fp_abs(&temp, a);
-        borrow = ct_sub_limbs(reduced.d, ctx->modulus.d, temp.d, NLIMBS);
-    } else {
-        // Для положительных чисел: r = a mod p
-        uint64_t carry = ct_sub_limbs(temp.d, a->d, ctx->modulus.d, NLIMBS);
-        // temp = a - p, если a >= p, иначе temp будет отрицательным
-        // reduced = a (если a < p) или a - p (если a >= p)
-        for (size_t i = 0; i < NLIMBS; i++) {
-            reduced.d[i] = a->d[i];
-        }
-        borrow = carry;
+int fp_ctx_init(fp_ctx_t* ctx, const fp* modulus) {
+    if (!ctx || !modulus) {
+        return TORUS_ERROR_INVALID_PARAM;
     }
     
-    // Constant-time выбор результата
-    uint64_t mask = (uint64_t)(-((int64_t)borrow));
-    for (size_t i = 0; i < NLIMBS; i++) {
-        r->d[i] = (reduced.d[i] & mask) | (temp.d[i] & ~mask);
+    // Copy modulus
+    fp_copy(&ctx->modulus, modulus);
+    
+    // Precompute Montgomery constants
+    if (montgomery_ctx_init(&ctx->montgomery_ctx, modulus) != TORUS_SUCCESS) {
+        return TORUS_ERROR_COMPUTATION;
     }
+    
+    // Precompute p - 2 for exponentiation
+    fp_set_one(&ctx->p_minus_2, ctx);
+    fp_add(&ctx->p_minus_2, modulus, &ctx->p_minus_2, ctx); // p + 1
+    fp_sub(&ctx->p_minus_2, &ctx->p_minus_2, &ctx->p_minus_2, ctx); // p - 2
+    
+    // Precompute (p + 1) / 4 for square roots (if p ≡ 3 mod 4)
+    fp_set_u64(&ctx->p_plus_1_div_4, 1, ctx);
+    fp_add(&ctx->p_plus_1_div_4, modulus, &ctx->p_plus_1_div_4, ctx); // p + 1
+    fp_set_u64(&ctx->temp, 4, ctx);
+    fp_inv(&ctx->temp, &ctx->temp, ctx); // 1/4
+    fp_mul(&ctx->p_plus_1_div_4, &ctx->p_plus_1_div_4, &ctx->temp, ctx); // (p + 1)/4
+    
+    return TORUS_SUCCESS;
 }
 
-/**
- * @brief Абсолютное значение многоразрядного числа
- * 
- * @param[out] r Результат: |a|
- * @param[in] a Исходное число
- * 
- * @note Constant-time операция
- */
-static void fp_abs(fp* r, const fp* a) {
-    // Для поля Fp все элементы неотрицательны, поэтому это просто копирование
-    fp_copy(r, a);
-}
-
-// Параметры для CSIDH-512
-static const uint64_t csidh512_modulus[NLIMBS] = {
-    0xFFFFFFFFFFFFFFC7, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF,
-    0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF
-};
-
-static const uint64_t csidh512_r[NLIMBS] = {
-    0x0000000000000039, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
-    0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000001
-};
-
-static const uint64_t csidh512_r2[NLIMBS] = {
-    0x000000000000038F, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
-    0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0xFFFFFFFFFFFFFFFF
-};
-
-static const uint64_t csidh512_inv = 0xC7; // -p^{-1} mod 2^64 для CSIDH-512
-
-const fp_ctx fp_ctx_512 = {
-    .modulus = {.d = {0xFFFFFFFFFFFFFFC7, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF,
-                      0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF}},
-    .r = {.d = {0x0000000000000039, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
-                0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000001}},
-    .r2 = {.d = {0x000000000000038F, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
-                 0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0xFFFFFFFFFFFFFFFF}},
-    .inv = 0xC7
-};
-
-void fp_init_ctx(fp_ctx* ctx, const uint64_t* modulus) {
-    if (!ctx || !modulus) return;
+void fp_ctx_cleanup(fp_ctx_t* ctx) {
+    if (!ctx) return;
     
-    // Копирование модуля
-    for (size_t i = 0; i < NLIMBS; i++) {
-        ctx->modulus.d[i] = modulus[i];
-    }
-    
-    // Вычисление R = 2^512 mod p
-    // Для CSIDH-512 R = 2^512 - p
-    uint64_t borrow = 0;
-    for (size_t i = 0; i < NLIMBS; i++) {
-        uint64_t temp = (i == NLIMBS - 1 ? 1 : 0) - modulus[i] - borrow;
-        borrow = (temp > (i == NLIMBS - 1 ? 1 : 0) - modulus[i]) || 
-                (borrow && (temp == (i == NLIMBS - 1 ? 1 : 0) - modulus[i]));
-        ctx->r.d[i] = temp;
-    }
-    
-    // Вычисление R^2 mod p (простейший способ - умножение R на R)
-    // В реальной реализации нужно точное вычисление
-    fp r_fp, r2_fp;
-    for (size_t i = 0; i < NLIMBS; i++) {
-        r_fp.d[i] = ctx->r.d[i];
-    }
-    fp_mul(&r2_fp, &r_fp, &r_fp, ctx);
-    for (size_t i = 0; i < NLIMBS; i++) {
-        ctx->r2.d[i] = r2_fp.d[i];
-    }
-    
-    // Вычисление inv = -p^{-1} mod 2^64
-    // Для CSIDH-512 это 0xC7
-    ctx->inv = 0xC7;
-}
-
-void fp_copy(fp* r, const fp* a) {
-    if (!r || !a) return;
-    memcpy(r->d, a->d, sizeof(a->d));
+    // Securely zeroize all sensitive data
+    secure_zeroize(ctx, sizeof(fp_ctx_t));
 }
 
 void fp_set_zero(fp* a) {
     if (!a) return;
-    memset(a->d, 0, sizeof(a->d));
+    
+    for (size_t i = 0; i < NLIMBS; i++) {
+        a->d[i] = 0;
+    }
 }
 
-void fp_set_one(fp* a, const fp_ctx* ctx) {
+void fp_set_one(fp* a, const fp_ctx_t* ctx) {
     if (!a || !ctx) return;
+    
     fp_set_zero(a);
-    fp_add(a, a, &ctx->r, ctx); // 1 в Montgomery представлении = R mod p
+    a->d[0] = 1;
+    fp_reduce(a, ctx);
 }
 
 int fp_is_zero(const fp* a) {
@@ -270,357 +73,460 @@ int fp_is_zero(const fp* a) {
     for (size_t i = 0; i < NLIMBS; i++) {
         result |= a->d[i];
     }
+    
+    // Constant-time comparison: returns 1 if all limbs are zero
     return (result == 0);
 }
 
-int fp_is_one(const fp* a, const fp_ctx* ctx) {
+int fp_is_one(const fp* a, const fp_ctx_t* ctx) {
     if (!a || !ctx) return 0;
     
-    fp temp;
-    fp_from_montgomery(&temp, a, ctx);
-    return fp_is_zero(&temp) && (temp.d[0] == 1);
+    fp one;
+    fp_set_one(&one, ctx);
+    return fp_equal(a, &one);
 }
 
 int fp_equal(const fp* a, const fp* b) {
     if (!a || !b) return 0;
     
-    uint64_t difference = 0;
+    uint64_t diff = 0;
     for (size_t i = 0; i < NLIMBS; i++) {
-        difference |= a->d[i] ^ b->d[i];
+        diff |= (a->d[i] ^ b->d[i]);
     }
-    return (difference == 0);
+    
+    // Constant-time comparison: returns 1 if all limbs are equal
+    return (diff == 0);
 }
 
-void fp_add(fp* r, const fp* a, const fp* b, const fp_ctx* ctx) {
-    if (!r || !a || !b || !ctx) return;
+void fp_copy(fp* dst, const fp* src) {
+    if (!dst || !src) return;
     
-    uint64_t t[NLIMBS + 1] = {0};
+    for (size_t i = 0; i < NLIMBS; i++) {
+        dst->d[i] = src->d[i];
+    }
+}
+
+int fp_random(fp* a, const fp_ctx_t* ctx) {
+    if (!a || !ctx) {
+        return TORUS_ERROR_INVALID_PARAM;
+    }
     
-    // Сложение с переносом
-    uint64_t carry = ct_add_limbs(t, a->d, b->d, NLIMBS);
-    t[NLIMBS] = carry;
+    // Generate random bytes
+    uint8_t random_bytes[NLIMBS * sizeof(uint64_t)];
+    if (random_bytes_secure(random_bytes, sizeof(random_bytes)) != TORUS_SUCCESS) {
+        return TORUS_ERROR_RANDOM;
+    }
     
-    // Модульное сокращение
+    // Convert to limbs
+    for (size_t i = 0; i < NLIMBS; i++) {
+        a->d[i] = 0;
+        for (size_t j = 0; j < sizeof(uint64_t); j++) {
+            a->d[i] |= ((uint64_t)random_bytes[i * sizeof(uint64_t) + j]) << (j * 8);
+        }
+    }
+    
+    // Ensure the value is less than modulus
+    fp_reduce(a, ctx);
+    
+    return TORUS_SUCCESS;
+}
+
+void fp_add(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
+#if defined(__AVX2__)
+    if (cpu_has_avx2()) {
+        fp_add_avx2(c, a, b, ctx);
+        return;
+    }
+#elif defined(__ARM_NEON)
+    if (cpu_has_neon()) {
+        fp_add_neon(c, a, b, ctx);
+        return;
+    }
+#endif
+    
+    fp_add_impl(c, a, b, ctx);
+}
+
+static void fp_add_impl(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
+    uint64_t carry = 0;
+    fp temp;
+    
+    // Add a + b
+    for (size_t i = 0; i < NLIMBS; i++) {
+        uint64_t sum = a->d[i] + b->d[i] + carry;
+        carry = (sum < a->d[i]) || (carry && (sum == a->d[i]));
+        temp.d[i] = sum;
+    }
+    
+    // Subtract modulus if result >= modulus
     uint64_t borrow = 0;
     fp reduced;
     for (size_t i = 0; i < NLIMBS; i++) {
-        __uint128_t diff = (__uint128_t)t[i] - ctx->modulus.d[i] - borrow;
-        reduced.d[i] = (uint64_t)diff;
-        borrow = (diff >> 64) & 1;
+        uint64_t diff = temp.d[i] - ctx->modulus.d[i] - borrow;
+        borrow = (temp.d[i] < ctx->modulus.d[i] + borrow) || 
+                (borrow && (temp.d[i] == ctx->modulus.d[i] + borrow));
+        reduced.d[i] = diff;
     }
     
-    // Constant-time выбор: если t >= p, то используем reduced, иначе t
-    uint64_t mask = (uint64_t)(-((int64_t)(borrow ^ 1)));
+    // Constant-time selection: use reduced if borrow == 0, else use temp
+    uint64_t mask = ~(uint64_t)0 + !borrow; // mask = (borrow == 0) ? ~0 : 0
     for (size_t i = 0; i < NLIMBS; i++) {
-        r->d[i] = (t[i] & mask) | (reduced.d[i] & ~mask);
+        c->d[i] = (temp.d[i] & mask) | (reduced.d[i] & ~mask);
     }
 }
 
-void fp_sub(fp* r, const fp* a, const fp* b, const fp_ctx* ctx) {
-    if (!r || !a || !b || !ctx) return;
+void fp_sub(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
+    uint64_t borrow = 0;
+    fp temp;
     
-    fp neg_b;
-    fp_neg(&neg_b, b, ctx);
-    fp_add(r, a, &neg_b, ctx);
-}
-
-void fp_neg(fp* r, const fp* a, const fp_ctx* ctx) {
-    if (!r || !a || !ctx) return;
-    
-    // -a mod p = p - a
-    uint64_t borrow = ct_sub_limbs(r->d, ctx->modulus.d, a->d, NLIMBS);
-    
-    // Если a = 0, то результат должен быть 0, а не p
-    uint64_t is_zero = fp_is_zero(a);
-    uint64_t mask = (uint64_t)(-((int64_t)is_zero));
+    // Subtract a - b
     for (size_t i = 0; i < NLIMBS; i++) {
-        r->d[i] &= ~mask;
+        uint64_t diff = a->d[i] - b->d[i] - borrow;
+        borrow = (a->d[i] < b->d[i] + borrow) || 
+                (borrow && (a->d[i] == b->d[i] + borrow));
+        temp.d[i] = diff;
     }
-}
-
-void fp_mul(fp* r, const fp* a, const fp* b, const fp_ctx* ctx) {
-    if (!r || !a || !b || !ctx) return;
     
-    // Используем Comba multiplication для умножения
-    uint64_t t[2 * NLIMBS] = {0};
-    
-    // Школьное умножение
+    // Add modulus if result is negative
+    uint64_t carry = 0;
+    fp adjusted;
     for (size_t i = 0; i < NLIMBS; i++) {
-        uint64_t carry = 0;
-        for (size_t j = 0; j < NLIMBS; j++) {
-            __uint128_t product = (__uint128_t)a->d[i] * b->d[j] + t[i + j] + carry;
-            t[i + j] = (uint64_t)product;
-            carry = (uint64_t)(product >> 64);
-        }
-        t[i + NLIMBS] = carry;
+        uint64_t sum = temp.d[i] + ctx->modulus.d[i] + carry;
+        carry = (sum < temp.d[i]) || (carry && (sum == temp.d[i]));
+        adjusted.d[i] = sum;
     }
     
-    // Montgomery reduction
+    // Constant-time selection: use adjusted if borrow == 1, else use temp
+    uint64_t mask = ~(uint64_t)0 + borrow; // mask = (borrow == 1) ? ~0 : 0
     for (size_t i = 0; i < NLIMBS; i++) {
-        uint64_t m = t[i] * ctx->inv;
-        montgomery_step(t + i, m, ctx->modulus.d, NLIMBS);
-    }
-    
-    // Копирование результата
-    for (size_t i = 0; i < NLIMBS; i++) {
-        r->d[i] = t[i + NLIMBS];
-    }
-    
-    // Финальное сокращение, если результат >= p
-    uint64_t borrow = ct_sub_limbs(t, r->d, ctx->modulus.d, NLIMBS);
-    uint64_t mask = (uint64_t)(-((int64_t)(borrow ^ 1)));
-    for (size_t i = 0; i < NLIMBS; i++) {
-        r->d[i] = (r->d[i] & mask) | (t[i] & ~mask);
+        c->d[i] = (temp.d[i] & ~mask) | (adjusted.d[i] & mask);
     }
 }
 
-void fp_sqr(fp* r, const fp* a, const fp_ctx* ctx) {
-    if (!r || !a || !ctx) return;
-    
-    // Оптимизированное возведение в квадрат
-    fp_mul(r, a, a, ctx);
-}
-
-int fp_inv(fp* r, const fp* a, const fp_ctx* ctx) {
-    if (!r || !a || !ctx || fp_is_zero(a)) return 0;
-    
-    // Используем алгоритм возведения в степень: a^(p-2) mod p
-    // Для CSIDH-512: p-2 = 2^512 - 0xFFFFFFFFFFFFFDC9
-    
-    fp result, base;
-    fp_set_one(&result, ctx);
-    fp_copy(&base, a);
-    
-    // Показатель степени p-2 (в Montgomery представлении)
-    // Для CSIDH-512: p-2 = 0xFFFFFFFFFFFFFFFF...FFFFFFFFFFFFFE37
-    uint64_t exponent[NLIMBS] = {
-        0xFFFFFFE37, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF,
-        0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF
-    };
-    
-    // Возведение в степень методом квадратов и умножений
-    for (int i = FP_BITS - 1; i >= 0; i--) {
-        fp_sqr(&result, &result, ctx);
-        
-        // Получение бита экспоненты
-        size_t limb_idx = i / BITS_PER_LIMB;
-        size_t bit_idx = i % BITS_PER_LIMB;
-        uint64_t bit = (exponent[limb_idx] >> bit_idx) & 1;
-        
-        fp temp;
-        fp_mul(&temp, &result, &base, ctx);
-        
-        // Constant-time выбор
-        for (size_t j = 0; j < NLIMBS; j++) {
-            result.d[j] = (result.d[j] & ~(uint64_t)(-(int64_t)bit)) | 
-                         (temp.d[j] & (uint64_t)(-(int64_t)bit));
-        }
-    }
-    
-    fp_copy(r, &result);
-    return 1;
-}
-
-int fp_div(fp* r, const fp* a, const fp* b, const fp_ctx* ctx) {
-    if (!r || !a || !b || !ctx || fp_is_zero(b)) return 0;
-    
-    fp inv_b;
-    if (!fp_inv(&inv_b, b, ctx)) return 0;
-    fp_mul(r, a, &inv_b, ctx);
-    return 1;
-}
-
-void fp_rand(fp* r) {
-    if (!r) return;
-    
-    // Генерация криптографически безопасных случайных байтов
-    if (RAND_bytes((unsigned char*)r->d, sizeof(r->d)) != 1) {
-        // Если не удалось использовать RAND_bytes, используем fallback
-        for (size_t i = 0; i < NLIMBS; i++) {
-            r->d[i] = rand() ^ ((uint64_t)rand() << 32);
-        }
-    }
-    
-    // Обеспечение, что число меньше p
-    // Используем rejection sampling
-    fp max_value = fp_ctx_512.modulus;
-    fp_sub(&max_value, &max_value, &fp_ctx_512.r, &fp_ctx_512); // max_value = p - 1
-    
-    while (ct_cmp_limbs(r->d, max_value.d, NLIMBS) > 0) {
-        if (RAND_bytes((unsigned char*)r->d, sizeof(r->d)) != 1) {
-            for (size_t i = 0; i < NLIMBS; i++) {
-                r->d[i] = rand() ^ ((uint64_t)rand() << 32);
-            }
-        }
-    }
-}
-
-void fp_from_bytes(fp* r, const uint8_t* bytes, size_t len) {
-    if (!r || !bytes) {
-        fp_set_zero(r);
+void fp_mul(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
+#if defined(__AVX2__)
+    if (cpu_has_avx2()) {
+        fp_mul_avx2(c, a, b, ctx);
         return;
     }
-    
-    fp_set_zero(r);
-    
-    // Копирование байтов в элемент поля (big-endian)
-    size_t bytes_to_copy = CT_MIN(len, NLIMBS * sizeof(uint64_t));
-    size_t start_idx = NLIMBS * sizeof(uint64_t) - bytes_to_copy;
-    
-    for (size_t i = 0; i < bytes_to_copy; i++) {
-        size_t byte_idx = start_idx + i;
-        size_t limb_idx = byte_idx / sizeof(uint64_t);
-        size_t byte_in_limb = byte_idx % sizeof(uint64_t);
-        r->d[limb_idx] |= ((uint64_t)bytes[i]) << (8 * (sizeof(uint64_t) - 1 - byte_in_limb));
+#elif defined(__ARM_NEON)
+    if (cpu_has_neon()) {
+        fp_mul_neon(c, a, b, ctx);
+        return;
     }
+#endif
     
-    // Модульное сокращение
-    // В реальной реализации нужно добавить полное сокращение
-    // Пока просто обрезаем старшие биты, если они есть
-    uint64_t mask = (uint64_t)(-1);
-    r->d[NLIMBS - 1] &= mask;
+    fp_mul_impl(c, a, b, ctx);
 }
 
-void fp_to_bytes(uint8_t* bytes, const fp* a) {
-    if (!bytes || !a) return;
+static void fp_mul_impl(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
+    // Use Montgomery multiplication for better performance
+    montgomery_multiply(c, a, b, &ctx->montgomery_ctx);
+}
+
+void fp_sqr(fp* c, const fp* a, const fp_ctx_t* ctx) {
+    // Square is just multiplication with itself
+    fp_mul(c, a, a, ctx);
+}
+
+int fp_inv(fp* c, const fp* a, const fp_ctx_t* ctx) {
+    if (!c || !a || !ctx) {
+        return TORUS_ERROR_INVALID_PARAM;
+    }
     
-    // Преобразование в big-endian байтовый массив
-    for (size_t limb_idx = 0; limb_idx < NLIMBS; limb_idx++) {
-        uint64_t limb = a->d[limb_idx];
-        for (size_t byte_idx = 0; byte_idx < sizeof(uint64_t); byte_idx++) {
-            size_t pos = limb_idx * sizeof(uint64_t) + byte_idx;
-            if (pos < FP_BITS / 8) {
-                bytes[pos] = (limb >> (8 * (sizeof(uint64_t) - 1 - byte_idx))) & 0xFF;
+    if (fp_is_zero(a)) {
+        return TORUS_ERROR_DIVISION_BY_ZERO;
+    }
+    
+    // Use Fermat's little theorem: a^{-1} = a^{p-2} mod p
+    return fp_inv_fermat(c, a, ctx);
+}
+
+static int fp_inv_fermat(fp* c, const fp* a, const fp_ctx_t* ctx) {
+    fp result;
+    fp_set_one(&result, ctx);
+    
+    fp base = *a;
+    fp exponent = ctx->p_minus_2;
+    
+    // Square-and-multiply exponentiation (constant-time)
+    for (int i = FP_BITS - 1; i >= 0; i--) {
+        fp_sqr(&result, &result, ctx);
+        
+        // Get bit i of exponent
+        int limb_idx = i / 64;
+        int bit_idx = i % 64;
+        uint64_t bit = (exponent.d[limb_idx] >> bit_idx) & 1;
+        
+        // Conditional multiplication
+        fp temp;
+        fp_mul(&temp, &result, &base, ctx);
+        
+        // Constant-time selection
+        fp_cmov(&result, &temp, bit);
+    }
+    
+    fp_copy(c, &result);
+    
+    // Securely zeroize temporary values
+    secure_zeroize(&result, sizeof(result));
+    secure_zeroize(&base, sizeof(base));
+    secure_zeroize(&temp, sizeof(temp));
+    
+    return TORUS_SUCCESS;
+}
+
+void fp_neg(fp* c, const fp* a, const fp_ctx_t* ctx) {
+    if (!c || !a || !ctx) return;
+    
+    // -a = p - a
+    fp_sub(c, &ctx->modulus, a, ctx);
+}
+
+void fp_pow(fp* c, const fp* a, const fp* e, const fp_ctx_t* ctx) {
+    if (!c || !a || !e || !ctx) return;
+    
+    fp result;
+    fp_set_one(&result, ctx);
+    
+    fp base = *a;
+    fp exponent = *e;
+    
+    // Square-and-multiply exponentiation (constant-time)
+    for (int i = FP_BITS - 1; i >= 0; i--) {
+        fp_sqr(&result, &result, ctx);
+        
+        // Get bit i of exponent
+        int limb_idx = i / 64;
+        int bit_idx = i % 64;
+        uint64_t bit = (exponent.d[limb_idx] >> bit_idx) & 1;
+        
+        // Conditional multiplication
+        fp temp;
+        fp_mul(&temp, &result, &base, ctx);
+        
+        // Constant-time selection
+        fp_cmov(&result, &temp, bit);
+    }
+    
+    fp_copy(c, &result);
+    
+    // Securely zeroize temporary values
+    secure_zeroize(&result, sizeof(result));
+    secure_zeroize(&base, sizeof(base));
+    secure_zeroize(&temp, sizeof(temp));
+}
+
+void fp_reduce(fp* a, const fp_ctx_t* ctx) {
+    fp_reduce_impl(a, ctx);
+}
+
+static void fp_reduce_impl(fp* a, const fp_ctx_t* ctx) {
+    // Check if a >= modulus
+    uint64_t borrow = 0;
+    for (size_t i = 0; i < NLIMBS; i++) {
+        uint64_t diff = a->d[i] - ctx->modulus.d[i] - borrow;
+        borrow = (a->d[i] < ctx->modulus.d[i] + borrow) || 
+                (borrow && (a->d[i] == ctx->modulus.d[i] + borrow));
+    }
+    
+    // If borrow == 0, then a >= modulus, subtract modulus
+    if (!borrow) {
+        borrow = 0;
+        for (size_t i = 0; i < NLIMBS; i++) {
+            uint64_t diff = a->d[i] - ctx->modulus.d[i] - borrow;
+            borrow = (a->d[i] < ctx->modulus.d[i] + borrow) || 
+                    (borrow && (a->d[i] == ctx->modulus.d[i] + borrow));
+            a->d[i] = diff;
+        }
+    }
+}
+
+int fp_is_square(const fp* a, const fp_ctx_t* ctx) {
+    if (!a || !ctx) return 0;
+    
+    if (fp_is_zero(a)) {
+        return 1; // 0 is a square
+    }
+    
+    // Use Euler's criterion: a is quadratic residue if a^{(p-1)/2} = 1
+    fp exponent;
+    fp_set_one(&exponent, ctx);
+    fp_add(&exponent, &ctx->modulus, &exponent, ctx); // p + 1
+    fp_sub(&exponent, &exponent, &exponent, ctx); // p - 1
+    fp_set_u64(&ctx->temp, 2, ctx);
+    fp_inv(&ctx->temp, &ctx->temp, ctx); // 1/2
+    fp_mul(&exponent, &exponent, &ctx->temp, ctx); // (p - 1)/2
+    
+    fp result;
+    fp_pow(&result, a, &exponent, ctx);
+    
+    return fp_is_one(&result, ctx);
+}
+
+int fp_sqrt(fp* c, const fp* a, const fp_ctx_t* ctx) {
+    if (!c || !a || !ctx) {
+        return TORUS_ERROR_INVALID_PARAM;
+    }
+    
+    if (fp_is_zero(a)) {
+        fp_set_zero(c);
+        return TORUS_SUCCESS;
+    }
+    
+    // Check if a is quadratic residue
+    if (!fp_is_square(a, ctx)) {
+        return TORUS_ERROR_NOT_QUADRATIC_RESIDUE;
+    }
+    
+    // Use Tonelli-Shanks algorithm for general case
+    return fp_sqrt_tonelli_shanks(c, a, ctx);
+}
+
+static int fp_sqrt_tonelli_shanks(fp* c, const fp* a, const fp_ctx_t* ctx) {
+    // Factor p - 1 = Q * 2^S
+    fp q = ctx->modulus;
+    fp_set_one(&q, ctx);
+    fp_sub(&q, &q, &q, ctx); // q = p - 1
+    
+    uint64_t s = 0;
+    fp temp = q;
+    
+    // Count factors of 2: while temp is even
+    while ((temp.d[0] & 1) == 0) {
+        fp_set_u64(&ctx->temp, 2, ctx);
+        fp_inv(&ctx->temp, &ctx->temp, ctx); // 1/2
+        fp_mul(&temp, &temp, &ctx->temp, ctx);
+        s++;
+    }
+    
+    // Find a quadratic non-residue z
+    fp z;
+    fp_set_one(&z, ctx);
+    do {
+        fp_add(&z, &z, &ctx->montgomery_ctx.one, ctx); // z = z + 1
+    } while (fp_is_square(&z, ctx));
+    
+    // Initialize variables
+    fp m = {0};
+    fp_set_u64(&m, s, ctx);
+    
+    fp c_val = {0};
+    fp_pow(&c_val, &z, &q, ctx);
+    
+    fp t = {0};
+    fp_pow(&t, a, &q, ctx);
+    
+    fp r = {0};
+    fp_set_u64(&ctx->temp, (q.d[0] + 1) >> 1, ctx);
+    fp_pow(&r, a, &ctx->temp, ctx);
+    
+    // Main loop
+    while (!fp_is_one(&t, ctx)) {
+        uint64_t i = 0;
+        fp t2i = t;
+        
+        // Find smallest i such that t^{2^i} = 1
+        while (!fp_is_one(&t2i, ctx)) {
+            fp_sqr(&t2i, &t2i, ctx);
+            i++;
+            if (i > s) {
+                return TORUS_ERROR_COMPUTATION;
             }
         }
-    }
-}
-
-int fp_legendre(const fp* a, const fp_ctx* ctx) {
-    if (!a || !ctx) return -1;
-    if (fp_is_zero(a)) return 0;
-    
-    // Используем критерий Эйлера: a^((p-1)/2) mod p
-    fp result, base;
-    fp_copy(&base, a);
-    
-    // Показатель степени (p-1)/2
-    // Для CSIDH-512: (p-1)/2 = 2^511 - 0x7FFFFFFFFFFFEF64
-    uint64_t exponent[NLIMBS] = {
-        0xFFFFFEF64, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF,
-        0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0x7FFFFFFFFFFFFFFF
-    };
-    
-    fp_set_one(&result, ctx);
-    
-    for (int i = FP_BITS - 1; i >= 0; i--) {
-        fp_sqr(&result, &result, ctx);
         
-        size_t limb_idx = i / BITS_PER_LIMB;
-        size_t bit_idx = i % BITS_PER_LIMB;
-        uint64_t bit = (exponent[limb_idx] >> bit_idx) & 1;
-        
-        fp temp;
-        fp_mul(&temp, &result, &base, ctx);
-        
-        for (size_t j = 0; j < NLIMBS; j++) {
-            result.d[j] = (result.d[j] & ~(uint64_t)(-(int64_t)bit)) | 
-                         (temp.d[j] & (uint64_t)(-(int64_t)bit));
+        // Update values
+        fp b = c_val;
+        for (uint64_t j = 0; j < s - i - 1; j++) {
+            fp_sqr(&b, &b, ctx);
         }
+        
+        fp_sqr(&b, &b, ctx); // b^2
+        fp_mul(&r, &r, &b, ctx);
+        fp_mul(&c_val, &b, &b, ctx); // b^2
+        fp_mul(&t, &t, &c_val, ctx);
+        s = i;
     }
     
-    // Результат: 1 если квадратичный вычет, p-1 если нет
-    if (fp_is_one(&result, ctx)) return 1;
-    
-    fp p_minus_1;
-    fp_sub(&p_minus_1, &ctx->modulus, &ctx->r, ctx); // p - 1
-    if (fp_equal(&result, &p_minus_1)) return -1;
-    
-    return 0; // Не должно происходить для ненулевых элементов
+    fp_copy(c, &r);
+    return TORUS_SUCCESS;
 }
 
-int fp_sqrt(fp* r, const fp* a, const fp_ctx* ctx) {
-    if (!r || !a || !ctx || fp_is_zero(a)) {
-        fp_set_zero(r);
-        return 1;
-    }
-    
-    // Проверка, что корень существует
-    if (fp_legendre(a, ctx) != 1) return 0;
-    
-    // Для CSIDH-512 p ≡ 3 (mod 4), используем формулу: r = a^((p+1)/4) mod p
-    fp result, base;
-    fp_copy(&base, a);
-    
-    // Показатель степени (p+1)/4
-    // Для CSIDH-512: (p+1)/4 = 2^510 - 0x3FFFFFFFFFFFEF31
-    uint64_t exponent[NLIMBS] = {
-        0xFFFFFEF31, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF,
-        0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0x3FFFFFFFFFFFFFFF
-    };
-    
-    fp_set_one(&result, ctx);
-    
-    for (int i = FP_BITS - 1; i >= 0; i--) {
-        fp_sqr(&result, &result, ctx);
-        
-        size_t limb_idx = i / BITS_PER_LIMB;
-        size_t bit_idx = i % BITS_PER_LIMB;
-        uint64_t bit = (exponent[limb_idx] >> bit_idx) & 1;
-        
-        fp temp;
-        fp_mul(&temp, &result, &base, ctx);
-        
-        for (size_t j = 0; j < NLIMBS; j++) {
-            result.d[j] = (result.d[j] & ~(uint64_t)(-(int64_t)bit)) | 
-                         (temp.d[j] & (uint64_t)(-(int64_t)bit));
-        }
-    }
-    
-    fp_copy(r, &result);
-    return 1;
+void fp_to_montgomery(fp* c, const fp* a, const fp_ctx_t* ctx) {
+    montgomery_to_montgomery(c, a, &ctx->montgomery_ctx);
 }
 
-void fp_to_montgomery(fp* r, const fp* a, const fp_ctx* ctx) {
-    if (!r || !a || !ctx) return;
-    
-    // a * R^2 * R^-1 = a * R mod p
-    fp_mul(r, a, &ctx->r2, ctx);
+void fp_from_montgomery(fp* c, const fp* a, const fp_ctx_t* ctx) {
+    montgomery_from_montgomery(c, a, &ctx->montgomery_ctx);
 }
 
-void fp_from_montgomery(fp* r, const fp* a, const fp_ctx* ctx) {
-    if (!r || !a || !ctx) return;
+void fp_cmov(fp* dst, const fp* src, uint8_t condition) {
+    if (!dst || !src) return;
     
-    fp one;
-    fp_set_one(&one, ctx);
-    fp_div(r, a, &one, ctx); // a * R^-1 = a / R mod p
-}
-
-void fp_secure_zeroize(fp* a) {
-    if (!a) return;
+    // Convert condition to mask: 0 -> 0x00..., 1 -> 0xFF...
+    uint64_t mask = ~(uint64_t)0 + !condition;
     
-    // Используем volatile для предотвращения оптимизации компилятором
-    volatile uint64_t* ptr = (volatile uint64_t*)a->d;
     for (size_t i = 0; i < NLIMBS; i++) {
-        ptr[i] = 0;
+        dst->d[i] = (dst->d[i] & mask) | (src->d[i] & ~mask);
     }
-    
-    // Дополнительная очистка для безопасности
-    memset((void*)ptr, 0, NLIMBS * sizeof(uint64_t));
 }
 
-int fp_constant_time_compare(const fp* a, const fp* b) {
-    if (!a || !b) return -1;
+void fp_cswap(fp* a, fp* b, uint8_t condition) {
+    if (!a || !b) return;
     
-    int result = 0;
-    uint64_t mask = 0;
+    // Convert condition to mask: 0 -> 0x00..., 1 -> 0xFF...
+    uint64_t mask = ~(uint64_t)0 + !condition;
     
-    for (size_t i = NLIMBS; i > 0; i--) {
-        size_t idx = i - 1;
-        int cmp = (a->d[idx] > b->d[idx]) - (a->d[idx] < b->d[idx]);
-        mask |= (uint64_t)(-(int64_t)(cmp != 0));
-        result = (result & ~(int)(mask)) | (cmp & (int)(mask));
+    for (size_t i = 0; i < NLIMBS; i++) {
+        uint64_t diff = (a->d[i] ^ b->d[i]) & mask;
+        a->d[i] ^= diff;
+        b->d[i] ^= diff;
+    }
+}
+
+// AVX2 optimized versions
+#ifdef __AVX2__
+#include <immintrin.h>
+
+void fp_add_avx2(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
+    // Process 4 limbs at a time with AVX2
+    for (size_t i = 0; i < NLIMBS; i += 4) {
+        __m256i a_vec = _mm256_loadu_si256((__m256i*)&a->d[i]);
+        __m256i b_vec = _mm256_loadu_si256((__m256i*)&b->d[i]);
+        __m256i sum = _mm256_add_epi64(a_vec, b_vec);
+        _mm256_storeu_si256((__m256i*)&c->d[i], sum);
     }
     
-    return result;
+    // Still need modular reduction
+    fp_reduce_impl(c, ctx);
 }
+
+void fp_mul_avx2(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
+    // Fall back to standard implementation for now
+    // AVX2 Montgomery multiplication would be more complex
+    fp_mul_impl(c, a, b, ctx);
+}
+#endif
+
+// ARM NEON optimized versions  
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+
+void fp_add_neon(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
+    // Process 2 limbs at a time with NEON
+    for (size_t i = 0; i < NLIMBS; i += 2) {
+        uint64x2_t a_vec = vld1q_u64(&a->d[i]);
+        uint64x2_t b_vec = vld1q_u64(&b->d[i]);
+        uint64x2_t sum = vaddq_u64(a_vec, b_vec);
+        vst1q_u64(&c->d[i], sum);
+    }
+    
+    // Still need modular reduction
+    fp_reduce_impl(c, ctx);
+}
+
+void fp_mul_neon(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx) {
+    // Fall back to standard implementation
+    fp_mul_impl(c, a, b, ctx);
+}
+#endif
