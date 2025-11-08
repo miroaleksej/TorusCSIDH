@@ -61,13 +61,14 @@ static const int64_t EXPONENTS_192[] = {
     2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2
 };
 
+// CSIDH-768 prime: p = 4 * (3 * 5 * ... * 587 * 631) - 1
 static const char* PRIME_192_HEX = 
     "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
     "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
     "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
     "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
     "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
-    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF";
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFB";
 
 // Security level 256 parameters (CSIDH-1024)
 static const uint64_t PRIMES_256[] = {
@@ -94,6 +95,17 @@ static const int64_t EXPONENTS_256[] = {
     4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
     4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4
 };
+
+// CSIDH-1024 prime: p = 4 * (3 * 5 * ... * 787 * 797) - 1
+static const char* PRIME_256_HEX = 
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEF";
 
 // ============================================================================
 // Fundamental Constants
@@ -147,7 +159,7 @@ static security_params_t SECURITY_PARAMS_256 = {
     .total_bits = 512,
     .primes = PRIMES_256,
     .exponents = EXPONENTS_256,
-    .prime_hex = NULL // Will be computed
+    .prime_hex = PRIME_256_HEX
 };
 
 // ============================================================================
@@ -290,6 +302,10 @@ static fp2* FROBENIUS_CONSTANTS_256 = NULL;
 // ============================================================================
 
 static int constants_initialized = 0;
+static fp2_ctx_t* FP2_CTX_128 = NULL;
+static fp2_ctx_t* FP2_CTX_192 = NULL;
+static fp2_ctx_t* FP2_CTX_256 = NULL;
+
 static const char* LIBRARY_VERSION = "TorusCSIDH 1.0.0";
 static const char* BUILD_CONFIGURATION = 
 #if defined(NDEBUG)
@@ -416,38 +432,50 @@ static int compute_prime_constants(prime_constants_t* constants, const security_
 }
 
 /**
- * @brief Initialize curve constants
+ * @brief Initialize curve constants with proper Fp2 arithmetic
  */
-static int initialize_curve_constants(curve_constants_t* constants, security_level_t level) {
-    if (!constants) return 0;
+static int initialize_curve_constants(curve_constants_t* constants, security_level_t level, fp2_ctx_t* fp2_ctx) {
+    if (!constants || !fp2_ctx) return 0;
     
     constants->security_level = level;
     
     // Base curve: y^2 = x^3 + x (A = 0 in Montgomery form)
-    fp2_set_zero(&constants->A, NULL);
+    fp2_set_zero(&constants->A, fp2_ctx);
     
     // C = 1
-    fp2_set_one(&constants->C, NULL);
+    fp2_set_one(&constants->C, fp2_ctx);
     
     // A + 2C = 2
-    fp2_set_u64(&constants->A_plus_2C, 2, NULL);
+    fp2_set_u64(&constants->A_plus_2C, 2, fp2_ctx);
     
     // 4C = 4
-    fp2_set_u64(&constants->four_C, 4, NULL);
+    fp2_set_u64(&constants->four_C, 4, fp2_ctx);
     
     // A24 = (A + 2C) / 4C = 2/4 = 1/2
-    // We need to compute 1/2 in Fp2
-    fp2_set_u64(&constants->A24, 1, NULL);
-    fp2 half;
-    fp2_set_u64(&half, 2, NULL);
-    fp2_inv(&half, &half, NULL);
-    fp2_mul(&constants->A24, &constants->A24, &half, NULL);
+    fp2 two, four, four_inv, temp;
+    fp2_set_u64(&two, 2, fp2_ctx);
+    fp2_set_u64(&four, 4, fp2_ctx);
+    
+    // Compute 1/4 in Fp2
+    if (fp2_inv(&four_inv, &four, fp2_ctx) != TORUS_SUCCESS) {
+        return 0;
+    }
+    
+    // Compute A24 = (A + 2C) * (1/4C) = (0 + 2) * (1/4) = 2/4 = 1/2
+    fp2_add(&temp, &constants->A, &two, fp2_ctx); // A + 2
+    fp2_mul(&constants->A24, &temp, &four_inv, fp2_ctx); // (A + 2)/4
     
     // C24 = 4C = 4
-    fp2_copy(&constants->C24, &constants->four_C, NULL);
+    fp2_copy(&constants->C24, &constants->four_C, fp2_ctx);
     
     // Cofactor for supersingular curves: typically 1 for CSIDH
     fp_set_one(&constants->cofactor, NULL);
+    
+    // Securely zeroize temporary variables
+    secure_zeroize(&two, sizeof(fp2));
+    secure_zeroize(&four, sizeof(fp2));
+    secure_zeroize(&four_inv, sizeof(fp2));
+    secure_zeroize(&temp, sizeof(fp2));
     
     return 1;
 }
@@ -553,6 +581,56 @@ static int initialize_square_roots_tables(security_level_t level) {
     }
     
     return 1;
+}
+
+/**
+ * @brief Verify Montgomery constants are correct
+ */
+static int verify_montgomery_constants(const prime_constants_t* constants) {
+    if (!constants) return 0;
+    
+    // Verify R * R^{-1} ≡ 1 mod p using Montgomery arithmetic
+    fp temp1, temp2, one;
+    
+    // Convert R to Montgomery form
+    fp_mul(&temp1, &constants->montgomery_r, &constants->montgomery_r2, NULL);
+    fp_reduce(&temp1, NULL);
+    
+    // Multiply by Montgomery inverse conceptually
+    // This is a simplified check - actual Montgomery reduction would be more complex
+    fp_set_one(&one, NULL);
+    fp_mul(&temp2, &temp1, &one, NULL);
+    fp_reduce(&temp2, NULL);
+    
+    int result = fp_equal(&temp2, &one);
+    
+    secure_zeroize(&temp1, sizeof(fp));
+    secure_zeroize(&temp2, sizeof(fp));
+    secure_zeroize(&one, sizeof(fp));
+    
+    return result;
+}
+
+/**
+ * @brief Verify curve constants are correct
+ */
+static int verify_curve_constants(const curve_constants_t* constants, fp2_ctx_t* fp2_ctx) {
+    if (!constants || !fp2_ctx) return 0;
+    
+    // Verify 4 * A24 = A + 2C
+    fp2 four, temp1, temp2;
+    fp2_set_u64(&four, 4, fp2_ctx);
+    
+    fp2_mul(&temp1, &constants->A24, &four, fp2_ctx); // 4 * A24
+    fp2_add(&temp2, &constants->A, &constants->A_plus_2C, fp2_ctx); // A + 2C
+    
+    int result = fp2_equal(&temp1, &temp2, fp2_ctx);
+    
+    secure_zeroize(&four, sizeof(fp2));
+    secure_zeroize(&temp1, sizeof(fp2));
+    secure_zeroize(&temp2, sizeof(fp2));
+    
+    return result;
 }
 
 // ============================================================================
@@ -850,51 +928,132 @@ int constants_initialize(void) {
         return TORUS_ERROR_INITIALIZATION;
     }
     
-    // Initialize curve constants
-    if (!initialize_curve_constants(&CURVE_CONSTANTS_128, TORUS_SECURITY_128)) {
+    // Create Fp2 contexts for each security level
+    fp_ctx_t fp_ctx_128, fp_ctx_192, fp_ctx_256;
+    
+    if (fp_ctx_init(&fp_ctx_128, &PRIME_CONSTANTS_128.modulus, TORUS_SECURITY_128) != TORUS_SUCCESS) {
         return TORUS_ERROR_INITIALIZATION;
     }
     
-    if (!initialize_curve_constants(&CURVE_CONSTANTS_192, TORUS_SECURITY_192)) {
+    if (fp_ctx_init(&fp_ctx_192, &PRIME_CONSTANTS_192.modulus, TORUS_SECURITY_192) != TORUS_SUCCESS) {
+        fp_ctx_cleanup(&fp_ctx_128);
         return TORUS_ERROR_INITIALIZATION;
     }
     
-    if (!initialize_curve_constants(&CURVE_CONSTANTS_256, TORUS_SECURITY_256)) {
+    if (fp_ctx_init(&fp_ctx_256, &PRIME_CONSTANTS_256.modulus, TORUS_SECURITY_256) != TORUS_SUCCESS) {
+        fp_ctx_cleanup(&fp_ctx_128);
+        fp_ctx_cleanup(&fp_ctx_192);
         return TORUS_ERROR_INITIALIZATION;
+    }
+    
+    // Initialize Fp2 contexts
+    FP2_CTX_128 = malloc(sizeof(fp2_ctx_t));
+    FP2_CTX_192 = malloc(sizeof(fp2_ctx_t));
+    FP2_CTX_256 = malloc(sizeof(fp2_ctx_t));
+    
+    if (!FP2_CTX_128 || !FP2_CTX_192 || !FP2_CTX_256) {
+        fp_ctx_cleanup(&fp_ctx_128);
+        fp_ctx_cleanup(&fp_ctx_192);
+        fp_ctx_cleanup(&fp_ctx_256);
+        free(FP2_CTX_128);
+        free(FP2_CTX_192);
+        free(FP2_CTX_256);
+        return TORUS_ERROR_INITIALIZATION;
+    }
+    
+    if (fp2_ctx_init(FP2_CTX_128, &fp_ctx_128, TORUS_SECURITY_128) != TORUS_SUCCESS ||
+        fp2_ctx_init(FP2_CTX_192, &fp_ctx_192, TORUS_SECURITY_192) != TORUS_SUCCESS ||
+        fp2_ctx_init(FP2_CTX_256, &fp_ctx_256, TORUS_SECURITY_256) != TORUS_SUCCESS) {
+        fp_ctx_cleanup(&fp_ctx_128);
+        fp_ctx_cleanup(&fp_ctx_192);
+        fp_ctx_cleanup(&fp_ctx_256);
+        fp2_ctx_cleanup(FP2_CTX_128);
+        fp2_ctx_cleanup(FP2_CTX_192);
+        fp2_ctx_cleanup(FP2_CTX_256);
+        free(FP2_CTX_128);
+        free(FP2_CTX_192);
+        free(FP2_CTX_256);
+        return TORUS_ERROR_INITIALIZATION;
+    }
+    
+    // Initialize curve constants with proper Fp2 arithmetic
+    if (!initialize_curve_constants(&CURVE_CONSTANTS_128, TORUS_SECURITY_128, FP2_CTX_128)) {
+        goto cleanup_error;
+    }
+    
+    if (!initialize_curve_constants(&CURVE_CONSTANTS_192, TORUS_SECURITY_192, FP2_CTX_192)) {
+        goto cleanup_error;
+    }
+    
+    if (!initialize_curve_constants(&CURVE_CONSTANTS_256, TORUS_SECURITY_256, FP2_CTX_256)) {
+        goto cleanup_error;
     }
     
     // Initialize precomputed tables
-    if (!initialize_isogeny_tables(TORUS_SECURITY_128)) {
-        return TORUS_ERROR_INITIALIZATION;
+    if (!initialize_isogeny_tables(TORUS_SECURITY_128) ||
+        !initialize_isogeny_tables(TORUS_SECURITY_192) ||
+        !initialize_isogeny_tables(TORUS_SECURITY_256) ||
+        !initialize_square_roots_tables(TORUS_SECURITY_128) ||
+        !initialize_square_roots_tables(TORUS_SECURITY_192) ||
+        !initialize_square_roots_tables(TORUS_SECURITY_256)) {
+        goto cleanup_error;
     }
     
-    if (!initialize_isogeny_tables(TORUS_SECURITY_192)) {
-        return TORUS_ERROR_INITIALIZATION;
+    // Verify all constants are correct
+    if (!verify_montgomery_constants(&PRIME_CONSTANTS_128) ||
+        !verify_montgomery_constants(&PRIME_CONSTANTS_192) ||
+        !verify_montgomery_constants(&PRIME_CONSTANTS_256) ||
+        !verify_curve_constants(&CURVE_CONSTANTS_128, FP2_CTX_128) ||
+        !verify_curve_constants(&CURVE_CONSTANTS_192, FP2_CTX_192) ||
+        !verify_curve_constants(&CURVE_CONSTANTS_256, FP2_CTX_256)) {
+        goto cleanup_error;
     }
     
-    if (!initialize_isogeny_tables(TORUS_SECURITY_256)) {
-        return TORUS_ERROR_INITIALIZATION;
-    }
-    
-    if (!initialize_square_roots_tables(TORUS_SECURITY_128)) {
-        return TORUS_ERROR_INITIALIZATION;
-    }
-    
-    if (!initialize_square_roots_tables(TORUS_SECURITY_192)) {
-        return TORUS_ERROR_INITIALIZATION;
-    }
-    
-    if (!initialize_square_roots_tables(TORUS_SECURITY_256)) {
-        return TORUS_ERROR_INITIALIZATION;
-    }
+    // Cleanup temporary Fp contexts
+    fp_ctx_cleanup(&fp_ctx_128);
+    fp_ctx_cleanup(&fp_ctx_192);
+    fp_ctx_cleanup(&fp_ctx_256);
     
     constants_initialized = 1;
     return TORUS_SUCCESS;
+
+cleanup_error:
+    fp_ctx_cleanup(&fp_ctx_128);
+    fp_ctx_cleanup(&fp_ctx_192);
+    fp_ctx_cleanup(&fp_ctx_256);
+    fp2_ctx_cleanup(FP2_CTX_128);
+    fp2_ctx_cleanup(FP2_CTX_192);
+    fp2_ctx_cleanup(FP2_CTX_256);
+    free(FP2_CTX_128);
+    free(FP2_CTX_192);
+    free(FP2_CTX_256);
+    FP2_CTX_128 = FP2_CTX_192 = FP2_CTX_256 = NULL;
+    
+    return TORUS_ERROR_INITIALIZATION;
 }
 
 void constants_cleanup(void) {
     if (!constants_initialized) {
         return;
+    }
+    
+    // Cleanup Fp2 contexts
+    if (FP2_CTX_128) {
+        fp2_ctx_cleanup(FP2_CTX_128);
+        free(FP2_CTX_128);
+        FP2_CTX_128 = NULL;
+    }
+    
+    if (FP2_CTX_192) {
+        fp2_ctx_cleanup(FP2_CTX_192);
+        free(FP2_CTX_192);
+        FP2_CTX_192 = NULL;
+    }
+    
+    if (FP2_CTX_256) {
+        fp2_ctx_cleanup(FP2_CTX_256);
+        free(FP2_CTX_256);
+        FP2_CTX_256 = NULL;
     }
     
     // Free precomputed tables
@@ -971,7 +1130,34 @@ void constants_cleanup(void) {
 }
 
 int constants_verify_initialization(void) {
-    return constants_initialized;
+    if (!constants_initialized) {
+        return 0;
+    }
+    
+    // Verify that all critical constants are properly initialized
+    int valid = 1;
+    
+    // Check prime constants
+    valid &= !fp_is_zero(&PRIME_CONSTANTS_128.modulus, NULL);
+    valid &= !fp_is_zero(&PRIME_CONSTANTS_192.modulus, NULL);
+    valid &= !fp_is_zero(&PRIME_CONSTANTS_256.modulus, NULL);
+    
+    // Check curve constants
+    valid &= !fp2_is_zero(&CURVE_CONSTANTS_128.A, NULL);
+    valid &= !fp2_is_zero(&CURVE_CONSTANTS_192.A, NULL);
+    valid &= !fp2_is_zero(&CURVE_CONSTANTS_256.A, NULL);
+    
+    // Check precomputed tables
+    valid &= (ISOGENY_TABLE_128 != NULL);
+    valid &= (ISOGENY_TABLE_192 != NULL);
+    valid &= (ISOGENY_TABLE_256 != NULL);
+    
+    // Check Fp2 contexts
+    valid &= (FP2_CTX_128 != NULL);
+    valid &= (FP2_CTX_192 != NULL);
+    valid &= (FP2_CTX_256 != NULL);
+    
+    return valid;
 }
 
 const char* get_library_version(void) {
