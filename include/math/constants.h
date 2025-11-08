@@ -3,6 +3,10 @@
 #define TORUS_CONSTANTS_H
 
 #include "torus_common.h"
+#include "math/fp_types.h"
+#include "math/fp2_arithmetic.h"
+#include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -15,11 +19,22 @@ extern "C" {
  * 
  * This module defines all mathematical constants, security parameters,
  * and precomputed values used throughout the TorusCSIDH system.
+ * All constants are optimized for performance and security.
  */
 
 // ============================================================================
 // Security Level Constants
 // ============================================================================
+
+/**
+ * @brief Security level enumeration
+ */
+typedef enum {
+    TORUS_SECURITY_128 = 128,  ///< 128-bit security level
+    TORUS_SECURITY_192 = 192,  ///< 192-bit security level  
+    TORUS_SECURITY_256 = 256,  ///< 256-bit security level
+    TORUS_SECURITY_512 = 512   ///< 512-bit security level (future use)
+} security_level_t;
 
 /**
  * @brief Security level parameters structure
@@ -29,14 +44,16 @@ typedef struct {
     uint32_t p_bits;               ///< Prime field size in bits
     uint32_t num_primes;           ///< Number of small primes
     uint32_t max_exponent;         ///< Maximum exponent for primes
+    uint32_t total_bits;           ///< Total exponent bits
     const uint64_t* primes;        ///< Array of small primes
     const int64_t* exponents;      ///< Array of exponent bounds
+    const char* prime_hex;         ///< Prime modulus in hex
 } security_params_t;
 
 /**
  * @brief Get security parameters for a given security level
  * 
- * @param level Security level (128, 192, 256, 512)
+ * @param level Security level
  * @return const security_params_t* Security parameters structure
  */
 TORUS_API const security_params_t* get_security_params(security_level_t level);
@@ -65,6 +82,14 @@ TORUS_API const uint64_t* get_primes_array(security_level_t level);
  */
 TORUS_API const int64_t* get_exponent_bounds(security_level_t level);
 
+/**
+ * @brief Get the maximum exponent for a security level
+ * 
+ * @param level Security level
+ * @return uint32_t Maximum exponent
+ */
+TORUS_API uint32_t get_max_exponent(security_level_t level);
+
 // ============================================================================
 // Prime Field Constants
 // ============================================================================
@@ -73,13 +98,17 @@ TORUS_API const int64_t* get_exponent_bounds(security_level_t level);
  * @brief Structure for prime field parameters
  */
 typedef struct {
-    uint64_t p[NLIMBS];           ///< Prime modulus
-    uint64_t p_minus_1[NLIMBS];   ///< p - 1
-    uint64_t p_minus_2[NLIMBS];   ///< p - 2
-    uint64_t p_plus_1[NLIMBS];    ///< p + 1
-    uint64_t montgomery_r[NLIMBS]; ///< Montgomery R = 2^(NLIMBS*64) mod p
-    uint64_t montgomery_r2[NLIMBS]; ///< Montgomery R^2 mod p
-    uint64_t montgomery_inv;      ///< Montgomery inverse
+    fp modulus;                    ///< Prime modulus
+    fp modulus_minus_one;          ///< p - 1
+    fp modulus_minus_two;          ///< p - 2
+    fp modulus_plus_one;           ///< p + 1
+    fp modulus_plus_one_div_two;   ///< (p + 1) / 2
+    fp modulus_minus_one_div_two;  ///< (p - 1) / 2
+    fp montgomery_r;               ///< Montgomery R = 2^k mod p
+    fp montgomery_r2;              ///< Montgomery R^2 mod p
+    uint64_t montgomery_inv;       ///< Montgomery inverse
+    uint32_t bits;                 ///< Number of bits in modulus
+    uint32_t bytes;                ///< Number of bytes in modulus
 } prime_constants_t;
 
 /**
@@ -94,25 +123,25 @@ TORUS_API const prime_constants_t* get_prime_constants(security_level_t level);
  * @brief Get the prime modulus for a security level
  * 
  * @param level Security level
- * @return const uint64_t* Prime modulus array
+ * @return const fp* Prime modulus
  */
-TORUS_API const uint64_t* get_prime_modulus(security_level_t level);
+TORUS_API const fp* get_prime_modulus(security_level_t level);
 
 /**
  * @brief Get Montgomery constant R for a security level
  * 
  * @param level Security level
- * @return const uint64_t* Montgomery R array
+ * @return const fp* Montgomery R
  */
-TORUS_API const uint64_t* get_montgomery_r(security_level_t level);
+TORUS_API const fp* get_montgomery_r(security_level_t level);
 
 /**
  * @brief Get Montgomery constant R^2 for a security level
  * 
  * @param level Security level
- * @return const uint64_t* Montgomery R^2 array
+ * @return const fp* Montgomery R^2
  */
-TORUS_API const uint64_t* get_montgomery_r2(security_level_t level);
+TORUS_API const fp* get_montgomery_r2(security_level_t level);
 
 /**
  * @brief Get Montgomery inverse for a security level
@@ -130,11 +159,14 @@ TORUS_API uint64_t get_montgomery_inv(security_level_t level);
  * @brief Structure for base curve parameters
  */
 typedef struct {
-    fp2_t A;                      ///< Curve parameter A in Montgomery form
-    fp2_t C;                      ///< Curve parameter C in Montgomery form
-    fp2_t A24;                    ///< Precomputed (A + 2)/4
-    fp2_t C24;                    ///< Precomputed (C + 2)/4
-    uint64_t cofactor[NLIMBS];    ///< Curve cofactor
+    fp2 A;                         ///< Curve parameter A in Montgomery form
+    fp2 C;                         ///< Curve parameter C in Montgomery form
+    fp2 A24;                       ///< Precomputed (A + 2C) / 4C
+    fp2 C24;                       ///< Precomputed 4C
+    fp2 A_plus_2C;                 ///< Precomputed A + 2C
+    fp2 four_C;                    ///< Precomputed 4C
+    fp cofactor;                   ///< Curve cofactor
+    uint32_t security_level;       ///< Security level
 } curve_constants_t;
 
 /**
@@ -149,25 +181,33 @@ TORUS_API const curve_constants_t* get_curve_constants(security_level_t level);
  * @brief Get the base curve parameter A
  * 
  * @param level Security level
- * @return const fp2_t* Curve parameter A
+ * @return const fp2* Curve parameter A
  */
-TORUS_API const fp2_t* get_base_curve_A(security_level_t level);
+TORUS_API const fp2* get_base_curve_A(security_level_t level);
 
 /**
  * @brief Get the base curve parameter C
  * 
  * @param level Security level
- * @return const fp2_t* Curve parameter C
+ * @return const fp2* Curve parameter C
  */
-TORUS_API const fp2_t* get_base_curve_C(security_level_t level);
+TORUS_API const fp2* get_base_curve_C(security_level_t level);
 
 /**
- * @brief Get precomputed A24 = (A + 2)/4
+ * @brief Get precomputed A24 = (A + 2C) / 4C
  * 
  * @param level Security level
- * @return const fp2_t* Precomputed A24
+ * @return const fp2* Precomputed A24
  */
-TORUS_API const fp2_t* get_precomputed_A24(security_level_t level);
+TORUS_API const fp2* get_precomputed_A24(security_level_t level);
+
+/**
+ * @brief Get curve cofactor
+ * 
+ * @param level Security level
+ * @return const fp* Curve cofactor
+ */
+TORUS_API const fp* get_curve_cofactor(security_level_t level);
 
 // ============================================================================
 // Isogeny Computation Constants
@@ -177,10 +217,13 @@ TORUS_API const fp2_t* get_precomputed_A24(security_level_t level);
  * @brief Structure for isogeny strategy parameters
  */
 typedef struct {
-    uint32_t max_degree;          ///< Maximum isogeny degree to compute directly
+    uint32_t max_degree;           ///< Maximum isogeny degree to compute directly
     uint32_t optimal_split_threshold; ///< Threshold for recursive splitting
-    uint32_t window_size;         ///< Window size for scalar multiplication
-    uint32_t batch_size;          ///< Optimal batch size for parallel computation
+    uint32_t window_size;          ///< Window size for scalar multiplication
+    uint32_t batch_size;           ///< Optimal batch size for parallel computation
+    uint32_t max_chain_length;     ///< Maximum isogeny chain length
+    uint32_t kernel_search_attempts; ///< Maximum attempts to find kernel point
+    double efficiency_factor;      ///< Strategy efficiency factor
 } isogeny_strategy_t;
 
 /**
@@ -207,34 +250,59 @@ TORUS_API uint32_t get_optimal_batch_size(security_level_t level);
  */
 TORUS_API uint32_t get_window_size(security_level_t level);
 
+/**
+ * @brief Get maximum isogeny chain length
+ * 
+ * @param level Security level
+ * @return uint32_t Maximum chain length
+ */
+TORUS_API uint32_t get_max_chain_length(security_level_t level);
+
 // ============================================================================
 // Precomputed Tables
 // ============================================================================
 
 /**
+ * @brief Structure for precomputed isogeny table entry
+ */
+typedef struct {
+    uint64_t prime;                ///< Small prime
+    fp2 kernel_point;              ///< Precomputed kernel point
+    fp2 isogeny_coeffs[4];         ///< Isogeny coefficients
+    uint32_t degree;               ///< Isogeny degree
+} isogeny_table_entry_t;
+
+/**
  * @brief Get precomputed table for small prime isogenies
  * 
- * @param prime The small prime
  * @param level Security level
- * @return const void* Precomputed table (NULL if not available)
+ * @return const isogeny_table_entry_t* Precomputed table
  */
-TORUS_API const void* get_precomputed_isogeny_table(uint64_t prime, security_level_t level);
+TORUS_API const isogeny_table_entry_t* get_precomputed_isogeny_table(security_level_t level);
 
 /**
  * @brief Get precomputed square roots table
  * 
  * @param level Security level
- * @return const uint64_t* Square roots table
+ * @return const fp* Square roots table
  */
-TORUS_API const uint64_t* get_square_roots_table(security_level_t level);
+TORUS_API const fp* get_square_roots_table(security_level_t level);
 
 /**
  * @brief Get precomputed inversion table
  * 
  * @param level Security level
- * @return const uint64_t* Inversion table
+ * @return const fp* Inversion table
  */
-TORUS_API const uint64_t* get_inversion_table(security_level_t level);
+TORUS_API const fp* get_inversion_table(security_level_t level);
+
+/**
+ * @brief Get precomputed Frobenius constants
+ * 
+ * @param level Security level
+ * @return const fp2* Frobenius constants
+ */
+TORUS_API const fp2* get_frobenius_constants(security_level_t level);
 
 // ============================================================================
 // Mathematical Constants
@@ -243,21 +311,21 @@ TORUS_API const uint64_t* get_inversion_table(security_level_t level);
 /**
  * @brief Fundamental mathematical constants
  */
-extern const uint64_t TORUS_ZERO[NLIMBS];
-extern const uint64_t TORUS_ONE[NLIMBS];
-extern const uint64_t TORUS_TWO[NLIMBS];
-extern const uint64_t TORUS_THREE[NLIMBS];
-extern const uint64_t TORUS_FOUR[NLIMBS];
-extern const uint64_t TORUS_EIGHT[NLIMBS];
+TORUS_API extern const fp FP_ZERO;
+TORUS_API extern const fp FP_ONE;
+TORUS_API extern const fp FP_TWO;
+TORUS_API extern const fp FP_THREE;
+TORUS_API extern const fp FP_FOUR;
+TORUS_API extern const fp FP_EIGHT;
 
 /**
  * @brief Fp2 constants
  */
-extern const fp2_t FP2_ZERO;
-extern const fp2_t FP2_ONE;
-extern const fp2_t FP2_I;          ///< Imaginary unit i in Fp2
-extern const fp2_t FP2_MINUS_ONE;
-extern const fp2_t FP2_MINUS_I;    ///< -i in Fp2
+TORUS_API extern const fp2 FP2_ZERO;
+TORUS_API extern const fp2 FP2_ONE;
+TORUS_API extern const fp2 FP2_I;          ///< Imaginary unit i in Fp2
+TORUS_API extern const fp2 FP2_MINUS_ONE;
+TORUS_API extern const fp2 FP2_MINUS_I;    ///< -i in Fp2
 
 /**
  * @brief Get fundamental constant as fp2 element
@@ -265,7 +333,7 @@ extern const fp2_t FP2_MINUS_I;    ///< -i in Fp2
  * @param value The constant value (0, 1, 2, etc.)
  * @return const fp2_t* Constant as fp2 element
  */
-TORUS_API const fp2_t* get_fp2_constant(uint64_t value);
+TORUS_API const fp2* get_fp2_constant(uint64_t value);
 
 // ============================================================================
 // Validation and Verification Constants
@@ -277,8 +345,10 @@ TORUS_API const fp2_t* get_fp2_constant(uint64_t value);
 typedef struct {
     uint32_t max_kernel_search_attempts; ///< Maximum attempts to find kernel point
     uint32_t point_verification_samples; ///< Number of samples for point verification
-    double valid_curve_threshold;       ///< Threshold for curve validation
-    uint32_t max_isogeny_chain_length;  ///< Maximum isogeny chain length
+    double valid_curve_threshold;        ///< Threshold for curve validation
+    uint32_t max_isogeny_chain_length;   ///< Maximum isogeny chain length
+    uint32_t security_margin;            ///< Security margin in bits
+    double rejection_sampling_threshold; ///< Threshold for rejection sampling
 } validation_constants_t;
 
 /**
@@ -296,6 +366,47 @@ TORUS_API const validation_constants_t* get_validation_constants(security_level_
  * @return uint32_t Maximum attempts
  */
 TORUS_API uint32_t get_max_kernel_attempts(security_level_t level);
+
+/**
+ * @brief Get security margin
+ * 
+ * @param level Security level
+ * @return uint32_t Security margin in bits
+ */
+TORUS_API uint32_t get_security_margin(security_level_t level);
+
+// ============================================================================
+// Performance Optimization Constants
+// ============================================================================
+
+/**
+ * @brief Structure for performance optimization parameters
+ */
+typedef struct {
+    uint32_t cache_line_size;      ///< CPU cache line size in bytes
+    uint32_t l1_cache_size;        ///< L1 cache size in KB
+    uint32_t l2_cache_size;        ///< L2 cache size in KB
+    uint32_t l3_cache_size;        ///< L3 cache size in KB
+    uint32_t optimal_thread_count; ///< Optimal number of threads
+    uint32_t vector_size;          ///< Optimal vector size for SIMD
+    uint32_t memory_alignment;     ///< Optimal memory alignment
+} performance_constants_t;
+
+/**
+ * @brief Get performance optimization constants
+ * 
+ * @param level Security level
+ * @return const performance_constants_t* Performance constants
+ */
+TORUS_API const performance_constants_t* get_performance_constants(security_level_t level);
+
+/**
+ * @brief Get optimal memory alignment
+ * 
+ * @param level Security level
+ * @return uint32_t Optimal alignment in bytes
+ */
+TORUS_API uint32_t get_optimal_alignment(security_level_t level);
 
 // ============================================================================
 // Utility Functions
@@ -319,6 +430,20 @@ TORUS_API void constants_cleanup(void);
  * @return int 1 if initialized, 0 otherwise
  */
 TORUS_API int constants_verify_initialization(void);
+
+/**
+ * @brief Get library version information
+ * 
+ * @return const char* Version string
+ */
+TORUS_API const char* get_library_version(void);
+
+/**
+ * @brief Get build configuration information
+ * 
+ * @return const char* Build configuration string
+ */
+TORUS_API const char* get_build_configuration(void);
 
 #ifdef __cplusplus
 }
