@@ -5,10 +5,16 @@
 #include "torus_common.h"
 #include "fp_types.h"
 #include "math/montgomery.h"
+#include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// ============================================================================
+// Constants and Configuration
+// ============================================================================
 
 /**
  * @file fp_arithmetic.h
@@ -21,6 +27,21 @@ extern "C" {
  */
 
 /**
+ * @brief Maximum number of attempts for random number generation
+ */
+#define FP_MAX_RANDOM_ATTEMPTS 256
+
+/**
+ * @brief Maximum number of iterations for Tonelli-Shanks algorithm
+ */
+#define FP_MAX_TS_ITERATIONS 100
+
+/**
+ * @brief Window size for exponentiation
+ */
+#define FP_EXPONENTIATION_WINDOW_SIZE 4
+
+/**
  * @brief Finite field context structure
  */
 typedef struct {
@@ -28,9 +49,15 @@ typedef struct {
     montgomery_ctx_t montgomery_ctx; ///< Montgomery multiplication context
     fp p_minus_2;                 ///< Precomputed p - 2 for exponentiation
     fp p_plus_1_div_4;            ///< Precomputed (p + 1) / 4 for square roots
-    fp temp;                      ///< Temporary storage for computations
+    fp p_minus_1_div_2;           ///< Precomputed (p - 1) / 2
     uint32_t security_level;      ///< Security level parameter
+    uint8_t p_mod_4_is_3;        ///< Flag indicating if p ≡ 3 mod 4
+    uint8_t p_mod_8_is_5;        ///< Flag indicating if p ≡ 5 mod 8
 } fp_ctx_t;
+
+// ============================================================================
+// Context Management
+// ============================================================================
 
 /**
  * @brief Initialize finite field context
@@ -52,6 +79,10 @@ TORUS_API int fp_ctx_init(fp_ctx_t* ctx, const fp* modulus, uint32_t security_le
  * @security Zeroizes sensitive data in context
  */
 TORUS_API void fp_ctx_cleanup(fp_ctx_t* ctx);
+
+// ============================================================================
+// Basic Operations
+// ============================================================================
 
 /**
  * @brief Set finite field element to zero
@@ -158,6 +189,10 @@ TORUS_API int fp_random(fp* a, const fp_ctx_t* ctx);
  */
 TORUS_API int fp_random_nonzero(fp* a, const fp_ctx_t* ctx);
 
+// ============================================================================
+// Arithmetic Operations
+// ============================================================================
+
 /**
  * @brief Modular addition: c = a + b mod p
  * 
@@ -252,6 +287,10 @@ TORUS_API void fp_pow(fp* c, const fp* a, const fp* e, const fp_ctx_t* ctx);
  */
 TORUS_API void fp_pow_u64(fp* c, const fp* a, uint64_t exponent, const fp_ctx_t* ctx);
 
+// ============================================================================
+// Advanced Operations
+// ============================================================================
+
 /**
  * @brief Modular reduction: a = a mod p
  * 
@@ -306,6 +345,10 @@ TORUS_API void fp_to_montgomery(fp* c, const fp* a, const fp_ctx_t* ctx);
  * @security Constant-time execution
  */
 TORUS_API void fp_from_montgomery(fp* c, const fp* a, const fp_ctx_t* ctx);
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
 
 /**
  * @brief Serialize finite field element to bytes (big-endian)
@@ -391,18 +434,51 @@ TORUS_API uint32_t fp_get_bits(const fp_ctx_t* ctx);
  */
 TORUS_API uint32_t fp_get_bytes(const fp_ctx_t* ctx);
 
-// Optimized versions for specific architectures
+// ============================================================================
+// Architecture-Specific Optimizations
+// ============================================================================
+
 #ifdef __AVX2__
+/**
+ * @brief AVX2 optimized addition
+ */
 TORUS_API void fp_add_avx2(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx);
+
+/**
+ * @brief AVX2 optimized subtraction
+ */
 TORUS_API void fp_sub_avx2(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx);
+
+/**
+ * @brief AVX2 optimized multiplication
+ */
 TORUS_API void fp_mul_avx2(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx);
+
+/**
+ * @brief AVX2 optimized squaring
+ */
 TORUS_API void fp_sqr_avx2(fp* c, const fp* a, const fp_ctx_t* ctx);
 #endif
 
 #ifdef __ARM_NEON
+/**
+ * @brief ARM NEON optimized addition
+ */
 TORUS_API void fp_add_neon(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx);
+
+/**
+ * @brief ARM NEON optimized subtraction
+ */
 TORUS_API void fp_sub_neon(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx);
+
+/**
+ * @brief ARM NEON optimized multiplication
+ */
 TORUS_API void fp_mul_neon(fp* c, const fp* a, const fp* b, const fp_ctx_t* ctx);
+
+/**
+ * @brief ARM NEON optimized squaring
+ */
 TORUS_API void fp_sqr_neon(fp* c, const fp* a, const fp_ctx_t* ctx);
 #endif
 
