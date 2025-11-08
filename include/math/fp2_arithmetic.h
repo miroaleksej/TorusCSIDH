@@ -13,6 +13,10 @@
 extern "C" {
 #endif
 
+// ============================================================================
+// Constants and Configuration
+// ============================================================================
+
 /**
  * @file fp2_arithmetic.h
  * @brief Arithmetic operations in quadratic extension field Fp2
@@ -21,6 +25,16 @@ extern "C" {
  * where Fp2 = Fp[i]/(i^2 + 1). Elements are represented as a + bi where a, b ∈ Fp.
  * All operations are implemented in constant-time to prevent timing attacks.
  */
+
+/**
+ * @brief Maximum number of attempts for random number generation
+ */
+#define FP2_MAX_RANDOM_ATTEMPTS 256
+
+/**
+ * @brief Maximum number of iterations for Tonelli-Shanks algorithm
+ */
+#define FP2_MAX_TS_ITERATIONS 100
 
 /**
  * @brief Element of Fp2 field
@@ -40,7 +54,12 @@ typedef struct {
     fp2 non_residue;          ///< Non-residue for Fp2 construction
     uint32_t security_level;  ///< Security level parameter
     uint8_t p_mod_4_is_3;    ///< Flag indicating if p ≡ 3 mod 4
+    uint8_t p_mod_8_is_5;    ///< Flag indicating if p ≡ 5 mod 8
 } fp2_ctx_t;
+
+// ============================================================================
+// Context Management
+// ============================================================================
 
 /**
  * @brief Initialize Fp2 context
@@ -58,6 +77,10 @@ TORUS_API int fp2_ctx_init(fp2_ctx_t* ctx, const fp_ctx_t* fp_ctx, uint32_t secu
  * @param ctx Fp2 context to cleanup
  */
 TORUS_API void fp2_ctx_cleanup(fp2_ctx_t* ctx);
+
+// ============================================================================
+// Basic Operations
+// ============================================================================
 
 /**
  * @brief Set Fp2 element to zero
@@ -158,6 +181,10 @@ TORUS_API int fp2_random_nonzero(fp2* a, const fp2_ctx_t* ctx);
  */
 TORUS_API void fp2_copy(fp2* dst, const fp2* src, const fp2_ctx_t* ctx);
 
+// ============================================================================
+// Arithmetic Operations
+// ============================================================================
+
 /**
  * @brief Fp2 addition: c = a + b
  * 
@@ -247,6 +274,10 @@ TORUS_API void fp2_mul_scalar(fp2* c, const fp2* a, const fp* k, const fp2_ctx_t
  */
 TORUS_API void fp2_mul_u64(fp2* c, const fp2* a, uint64_t k, const fp2_ctx_t* ctx);
 
+// ============================================================================
+// Advanced Operations
+// ============================================================================
+
 /**
  * @brief Fp2 complex conjugation: c = conjugate(a)
  * 
@@ -312,6 +343,10 @@ TORUS_API void fp2_pow_u64(fp2* c, const fp2* a, uint64_t exponent, const fp2_ct
  * @param ctx Fp2 context
  */
 TORUS_API void fp2_frobenius(fp2* c, const fp2* a, const fp2_ctx_t* ctx);
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
 
 /**
  * @brief Modular reduction of Fp2 element
