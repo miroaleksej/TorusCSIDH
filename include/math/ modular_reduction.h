@@ -48,10 +48,11 @@ typedef struct {
  */
 typedef struct {
     fp modulus;           ///< The modulus p
-    fp p_plus_1_half;     ///< (p + 1) / 2 for special reduction
+    fp p_plus_1;          ///< p + 1 for special reduction
     fp p_minus_1_half;    ///< (p - 1) / 2 for bounds checking
     uint32_t num_primes;  ///< Number of small primes in product
     const uint64_t* primes; ///< Array of small primes
+    uint64_t product;     ///< Product of small primes for optimization
 } csidh_reduction_params_t;
 
 /**
@@ -151,7 +152,7 @@ TORUS_API int csidh_reduction_params_init(csidh_reduction_params_t* params, cons
  * @brief Specialized reduction for CSIDH primes
  * 
  * This function uses the special form of CSIDH primes (p = 4 * ∏ ℓ_i - 1)
- * for optimized reduction.
+ * for optimized reduction using the smoothness of p + 1.
  * 
  * @param result[out] Result of reduction (a mod p)
  * @param a[in] Input value to reduce
@@ -166,6 +167,7 @@ TORUS_API int csidh_special_reduce(fp* result, const fp* a, const csidh_reductio
  * @brief Fast reduction for CSIDH primes using special form
  * 
  * Uses the fact that p = 4 * ∏ ℓ_i - 1 for faster reduction
+ * by exploiting the smoothness of p + 1.
  * 
  * @param result[out] Result of reduction (a mod p)
  * @param a[in] Input value to reduce
@@ -175,6 +177,14 @@ TORUS_API int csidh_special_reduce(fp* result, const fp* a, const csidh_reductio
  * @constant_time This function executes in constant time
  */
 TORUS_API int csidh_fast_reduce(fp* result, const fp* a, const csidh_reduction_params_t* params);
+
+/**
+ * @brief Verify CSIDH reduction parameters
+ * 
+ * @param params[in] CSIDH reduction parameters to verify
+ * @return int TORUS_SUCCESS if valid, error code otherwise
+ */
+TORUS_API int csidh_verify_params(const csidh_reduction_params_t* params);
 
 /**
  * @brief Conditional subtraction of modulus
@@ -275,6 +285,22 @@ TORUS_API size_t fp_modulus_bits(const fp* modulus);
  * @return size_t Number of limbs
  */
 TORUS_API size_t fp_modulus_limbs(const fp* modulus);
+
+/**
+ * @brief Verify Barrett reduction parameters
+ * 
+ * @param params[in] Barrett parameters to verify
+ * @return int TORUS_SUCCESS if valid, error code otherwise
+ */
+TORUS_API int barrett_verify_params(const barrett_params_t* params);
+
+/**
+ * @brief Verify Montgomery reduction parameters
+ * 
+ * @param params[in] Montgomery parameters to verify
+ * @return int TORUS_SUCCESS if valid, error code otherwise
+ */
+TORUS_API int montgomery_verify_params(const montgomery_params_t* params);
 
 /**
  * @brief Cleanup and zeroize reduction parameters
