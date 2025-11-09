@@ -1,0 +1,230 @@
+[package]
+name = "toruscsidh"
+version = "1.0.0"
+authors = ["TorusCSIDH Team <security@toruscsidh.org>"]
+edition = "2021"
+description = "Post-quantum cryptographic system based on supersingular isogenies with formal verification guarantees"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/toruscsidh/toruscsidh"
+homepage = "https://toruscsidh.org"
+documentation = "https://docs.toruscsidh.org"
+readme = "README.md"
+keywords = ["cryptography", "post-quantum", "isogeny", "formal-verification", "nist-pqc"]
+categories = ["cryptography", "algorithms", "mathematics"]
+
+[package.metadata.rust-analyzer]
+cargo.target-dir = "target"
+
+[lib]
+name = "toruscsidh"
+path = "src/lib.rs"
+crate-type = ["lib"]
+
+[[bin]]
+name = "toruscsidh-cli"
+path = "src/bin/cli.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "toruscsidh-bench"
+path = "src/bin/bench.rs"
+required-features = ["benchmark"]
+
+[[bin]]
+name = "toruscsidh-audit"
+path = "src/bin/audit.rs"
+required-features = ["auditor"]
+
+[[bin]]
+name = "toruscsidh-kem"
+path = "src/bin/kem.rs"
+required-features = ["openssl-integration"]
+
+[features]
+default = ["nist-level1", "geometric-verification"]
+debug-assertions = ["dep:debug-assertions"]
+nist-level1 = ["dep:serde", "dep:sha2"]  # 128-bit security
+nist-level3 = ["nist-level1"]           # 192-bit security
+nist-level5 = ["nist-level3"]            # 256-bit security
+geometric-verification = ["dep:statrs"]
+constant-time = ["dep:subtle", "dep:zeroize"]
+self-healing = ["dep:rand", "dep:statrs", "dep:log"]
+adaptive-security = ["self-healing"]
+attack-prediction = ["dep:statrs", "self-healing"]
+formal-verification = ["dep:coq-serapi"]  # For Coq integration
+benchmark = ["dep:criterion", "dep:rand"]
+fuzzing = ["dep:libfuzzer-sys", "dep:proptest"]
+auditor = ["benchmark", "attack-prediction", "geometric-verification", "dep:serde_json"]
+openssl-integration = ["dep:openssl", "dep:openssl-sys"]
+cli = ["dep:clap", "dep:serde_json"]
+memory-hardening = ["zeroize", "dep:clear_on_drop"]
+timing-resistance = ["constant-time"]
+side-channel-protection = ["timing-resistance", "memory-hardening"]
+hardware-acceleration = []  # Reserved for future AVX2/NEON support
+production = ["nist-level1", "geometric-verification", "side-channel-protection", "self-healing", "openssl-integration", "cli", "auditor"]
+
+[dependencies]
+# Core dependencies
+rug = { version = "1.21.0", features = ["integer", "rational", "float", "complex"] }
+num-bigint = "0.4.3"
+num-traits = "0.2.15"
+num-integer = "0.1.45"
+
+# Security dependencies
+subtle = { version = "2.4.1", features = ["i128", "ops"] }
+zeroize = { version = "1.6.0", features = ["zeroize_derive"] }
+getrandom = { version = "0.2.8", features = ["std"] }
+rand = { version = "0.8.5", optional = true }
+rand_chacha = { version = "0.3.1", optional = true }
+
+# Mathematical dependencies
+statrs = { version = "0.16.0", optional = true }
+
+# Serialization
+serde = { version = "1.0.152", features = ["derive"], optional = true }
+serde_json = { version = "1.0.91", optional = true }
+
+# Hashing
+sha2 = { version = "0.10.6", optional = true }
+sha3 = { version = "0.10.6", optional = true }
+hmac = { version = "0.12.1", optional = true }
+
+# Formal verification
+coq-serapi = { version = "0.15.0", optional = true }
+thiserror = "1.0.38"
+
+# Security logging
+log = { version = "0.4.17", optional = true }
+env_logger = { version = "0.10.0", optional = true }
+
+# Command line interface
+clap = { version = "4.2.4", features = ["derive"], optional = true }
+
+# Audit and analysis
+proptest = { version = "1.1.0", optional = true }
+
+# OpenSSL integration
+openssl = { version = "0.10.54", optional = true }
+openssl-sys = { version = "0.9.83", optional = true }
+
+# Memory protection
+clear_on_drop = { version = "0.2.3", optional = true }
+
+# Benchmarking
+criterion = { version = "0.4.0", optional = true }
+
+# Development dependencies
+debug-assertions = { version = "1.0.0", optional = true }
+
+[dev-dependencies]
+criterion = "0.4.0"
+proptest = "1.1.0"
+libfuzzer-sys = { version = "0.4.5", optional = true }
+tempfile = "3.8.0"
+quickcheck = "1.0.3"
+rand = "0.8.5"
+rand_chacha = "0.3.1"
+hex = "0.4.3"
+base64 = "0.21.0"
+pretty_assertions = "1.3.0"
+
+[build-dependencies]
+cc = "1.0.79"
+bindgen = "0.65.1"
+pkg-config = "0.3.27"
+
+[target.'cfg(not(target_env = "msvc"))'.build-dependencies]
+openssl-sys = "0.9.83"
+
+[target.'cfg(target_env = "msvc")'.build-dependencies]
+vcpkg = "0.2.15"
+
+[profile.release]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+lto = "fat"
+panic = "abort"
+incremental = false
+codegen-units = 1
+rpath = false
+
+[profile.bench]
+inherits = "release"
+
+[profile.dev]
+opt-level = 0
+debug = true
+debug-assertions = true
+overflow-checks = true
+lto = false
+panic = "unwind"
+incremental = true
+
+[profile.test]
+inherits = "dev"
+
+[workspace]
+members = [
+    "src/arithmetic",
+    "src/curves",
+    "src/params",
+    "src/protocols",
+    "src/security",
+    "src/errors",
+    "openssl_integration",
+    "benches",
+    "tests",
+    "examples"
+]
+
+[workspace.dependencies]
+# Workspace-level dependencies for consistent versions across crates
+rug = "1.21.0"
+subtle = "2.4.1"
+zeroize = "1.6.0"
+getrandom = "0.2.8"
+statrs = "0.16.0"
+serde = { version = "1.0.152", features = ["derive"] }
+serde_json = "1.0.91"
+sha2 = "0.10.6"
+thiserror = "1.0.38"
+clap = { version = "4.2.4", features = ["derive"] }
+proptest = "1.1.0"
+openssl = "0.10.54"
+criterion = "0.4.0"
+coq-serapi = "0.15.0"
+log = "0.4.17"
+env_logger = "0.10.0"
+clear_on_drop = "0.2.3"
+
+# Security hardening configuration
+[package.metadata.security]
+# Enable all security-focused lints
+deny-warnings = true
+# Enable additional security checks
+security-audit = true
+# Enable memory safety checks
+memory-safety = true
+# Enable constant-time operation checks
+constant-time-checks = true
+# Enable formal verification integration
+formal-verification = true
+
+# Lint configuration
+[package.metadata.clippy]
+# Enable all security-focused lints
+pedantic = true
+restriction = true
+# Disable unsafe code where possible
+deny-unsafe = true
+# Enable all warnings
+deny-warnings = true
+
+# Documentation configuration
+[package.metadata.docs.rs]
+features = ["nist-level1", "geometric-verification", "constant-time", "formal-verification"]
+rustdoc-args = ["--cfg", "docsrs"]
+targets = ["x86_64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"]
+rustc-args = ["-C", "target-cpu=native", "-C", "opt-level=3"]
