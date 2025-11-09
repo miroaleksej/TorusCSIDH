@@ -2,8 +2,6 @@
 
 ![image](https://github.com/user-attachments/assets/3b35effc-34f7-496b-8968-759596bf323b)
 
-## [![IND-CCA2 Security](https://img.shields.io/badge/Security-IND--CCA2%20Proven-green?logo=security)](proofs/security/KeyExchange_Security.v) [![![Docker Image](https://img.shields.io/badge/Docker-Production%20Ready-blue?logo=docker)](docker/production/Dockerfile) [![License](https://img.shields.io/badge/License-MIT%2FApache--2.0-blue)](LICENSE)
-
 **⚠️ IMPORTANT DISCLAIMER: This system is currently under active development and has not undergone independent security evaluation or professional third-party testing. It is intended for research purposes only and should not be used in production environments or for securing sensitive data at this stage.**
 
 ## Overview
