@@ -1,0 +1,289 @@
+# .github/workflows/main.yml
+# CI/CD pipeline for TorusCSIDH formal verification and security testing
+name: "TorusCSIDH: Formal Verification & Security Pipeline"
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: '0 2 * * MON'  # Weekly security audit every Monday at 2 AM UTC
+
+env:
+  COQ_VERSION: 8.18.0
+  OPAM_SWITCH: 4.14
+  RUST_VERSION: 1.78.0
+
+jobs:
+  setup-environment:
+    runs-on: ubuntu-22.04
+    outputs:
+      cache-key: ${{ steps.cache.outputs.cache-key }}
+    steps:
+      - name: "🔍 Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: "⚙️ Set up OCaml/Coq environment"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y opam m4 pkg-config libgmp-dev libffi-dev
+          opam init --disable-sandboxing --yes
+          eval $(opam env)
+          opam switch create ${{ env.OPAM_SWITCH }} --yes
+          opam install -y coq.${{ env.COQ_VERSION }}
+          opam install -y coq-mathcomp-ssreflect coq-mathcomp-algebra coq-stdpp coq-serapi
+
+      - name: "⚙️ Set up Rust toolchain"
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          override: true
+          components: clippy, rustfmt
+
+      - name: "💾 Cache dependencies"
+        id: cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.opam
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-coq-${{ env.COQ_VERSION }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock', '**/*.opam') }}
+          restore-keys: |
+            ${{ runner.os }}-coq-${{ env.COQ_VERSION }}-rust-${{ env.RUST_VERSION }}-
+            ${{ runner.os }}-coq-
+            ${{ runner.os }}-rust-
+
+  formal-verification:
+    needs: setup-environment
+    runs-on: ubuntu-22.04
+    steps:
+      - name: "🔍 Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: "🏃 Restore cache"
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.opam
+            proofs
+          key: ${{ needs.setup-environment.outputs.cache-key }}
+
+      - name: "🔧 Setup Coq environment"
+        run: |
+          eval $(opam env)
+          cd proofs
+          make clean
+
+      - name: "✅ Build all proofs"
+        run: |
+          eval $(opam env)
+          cd proofs
+          make -j $(nproc)
+        timeout-minutes: 60
+
+      - name: "🔍 Verify proofs with coqchk"
+        run: |
+          eval $(opam env)
+          cd proofs
+          make verify-proofs
+        timeout-minutes: 30
+
+      - name: "📊 Generate verification report"
+        run: |
+          eval $(opam env)
+          cd proofs
+          make generate-report
+        timeout-minutes: 10
+
+      - name: "📤 Upload verification artifacts"
+        uses: actions/upload-artifact@v3
+        with:
+          name: formal-verification
+          path: |
+            proofs/**/*.vo
+            proofs/**/*.glob
+            verification_report.txt
+            proofs/dependencies.dot
+
+  security-analysis:
+    needs: setup-environment
+    runs-on: ubuntu-22.04
+    steps:
+      - name: "🔍 Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: "🏃 Restore cache"
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ needs.setup-environment.outputs.cache-key }}
+
+      - name: "🔧 Setup security tools"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind afl libasan5 libubsan1
+          pip3 install --upgrade pip
+          pip3 install bandit safety numpy pandas matplotlib criterion proptest
+
+      - name: "🧪 Run security tests"
+        run: |
+          cargo build --release --all-features
+          cargo test --release --all-features
+          cargo test --release --examples --all-features
+        timeout-minutes: 30
+
+      - name: "🧠 Run static analysis"
+        run: |
+          bandit -r src/ -f json -o bandit_report.json
+          safety check -r requirements.txt > safety_report.txt
+          valgrind --leak-check=full --error-exitcode=1 ./target/release/toruscsidh --run-security-tests
+        timeout-minutes: 20
+
+      - name: "⚡ Run side-channel analysis"
+        run: |
+          ./target/release/toruscsidh --analyze-sidechannels --samples 100000
+        timeout-minutes: 15
+
+      - name: "📤 Upload security artifacts"
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-analysis
+          path: |
+            bandit_report.json
+            safety_report.txt
+            target/**/*.gcov
+            sidechannel_analysis.json
+
+  quality-assurance:
+    needs: [formal-verification, security-analysis]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: "🔍 Checkout repository"
+        uses: actions/checkout@v4
+
+      - name: "🏃 Download artifacts"
+        uses: actions/download-artifact@v3
+        with:
+          name: formal-verification
+          path: formal-verification/
+
+      - name: "🏃 Download security artifacts"
+        uses: actions/download-artifact@v3
+        with:
+          name: security-analysis
+          path: security-analysis/
+
+      - name: "📊 Generate quality report"
+        run: |
+          python3 scripts/generate_quality_report.py \
+            --formal formal-verification/verification_report.txt \
+            --security security-analysis/ \
+            --output quality_report.md
+        timeout-minutes: 5
+
+      - name: "✅ Final quality validation"
+        run: |
+          python3 scripts/validate_quality_report.py --report quality_report.md
+        timeout-minutes: 2
+
+      - name: "📤 Upload quality report"
+        uses: actions/upload-artifact@v3
+        with:
+          name: quality-report
+          path: quality_report.md
+
+  deployment-package:
+    needs: quality-assurance
+    if: github.ref == 'refs/heads/main' && needs.quality-assurance.result == 'success'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: "🔍 Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: "🏃 Download quality report"
+        uses: actions/download-artifact@v3
+        with:
+          name: quality-report
+          path: reports/
+
+      - name: "📦 Create deployment package"
+        run: |
+          mkdir -p deployment-package
+          cp target/release/toruscsidh deployment-package/
+          cp proofs/**/*.vo deployment-package/proofs/
+          cp config/production.toml deployment-package/config/
+          cp scripts/health_check.sh deployment-package/scripts/
+          cp reports/quality_report.md deployment-package/docs/
+          
+          # Generate integrity checksums
+          find deployment-package -type f -exec sha256sum {} \; > deployment-package/checksums.sha256
+          
+          # Create final tarball
+          tar -czf toruscsidh-production-${{ github.sha }}.tar.gz deployment-package/
+        timeout-minutes: 10
+
+      - name: "📤 Upload deployment package"
+        uses: actions/upload-artifact@v3
+        with:
+          name: toruscsidh-production-package
+          path: toruscsidh-production-*.tar.gz
+
+      - name: "✅ Final verification"
+        run: |
+          echo "🎉 TorusCSIDH has passed all verification and security checks!"
+          echo "🔍 Verification report: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts"
+          echo "📦 Deployment package is ready for production use"
+        timeout-minutes: 1
+
+  notification:
+    needs: deployment-package
+    runs-on: ubuntu-22.04
+    if: always()
+    steps:
+      - name: "📥 Download quality report"
+        uses: actions/download-artifact@v3
+        with:
+          name: quality-report
+          path: reports/
+
+      - name: "📧 Notify security team"
+        if: needs.deployment-package.result == 'failure'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('reports/quality_report.md', 'utf8');
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `🚨 **CRITICAL: Security verification failed**\n\nThe TorusCSIDH system has failed formal verification or security testing. Please review the quality report immediately:\n\n${report.substring(0, 500)}...\n\nFull report: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts`
+            });
+
+      - name: "🎉 Celebrate success"
+        if: needs.deployment-package.result == 'success'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `✅ **SUCCESS: TorusCSIDH passed all verification checks**\n\nThe system has successfully passed:\n- Formal verification of all Coq proofs\n- Security analysis against side-channel attacks\n- Memory safety verification\n- Constant-time execution guarantees\n\nDeployment package is ready for production use.`
+            });
