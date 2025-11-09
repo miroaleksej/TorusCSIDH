@@ -1,4 +1,4 @@
-# TorusCSIDH: Post-Quantum Cryptographic System for Bitcoin
+# TorusCSIDH: Post-Quantum Cryptographic System
 
 ![image](https://github.com/user-attachments/assets/3b35effc-34f7-496b-8968-759596bf323b)
 
