@@ -277,7 +277,7 @@ The auditor should pay special attention to:
 
 For questions regarding this audit documentation or to report security vulnerabilities:
 
-- **Security Team**: security@toruscsidh.org
+- **Security Team**: miro-aleksej@yandex.ru
 - **PGP Key**: 0x1234567890ABCDEF (available in `docs/SECURITY.asc`)
 - **Critical Vulnerability Response Time**: < 2 hours
 - **Regular Security Inquiries Response Time**: < 24 hours
