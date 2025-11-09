@@ -1,0 +1,443 @@
+# .github/workflows/verification.yml
+name: "🔒 TorusCSIDH: Formal Verification & Security Audit Pipeline"
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 2 * * 1'  # Weekly security audit every Monday at 2 AM UTC
+  workflow_dispatch:  # Manual trigger
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: 1.78.0
+  COQ_VERSION: 8.18.0
+  OPAM_SWITCH: 4.14
+
+jobs:
+  setup-environment:
+    runs-on: ubuntu-22.04
+    outputs:
+      cache-key: ${{ steps.cache.outputs.cache-key }}
+    steps:
+      - name: "🔍 Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: "⚙️ Set up Rust toolchain"
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          override: true
+          components: clippy, rustfmt
+
+      - name: "⚙️ Set up OCaml/Coq environment"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y opam m4 pkg-config libgmp-dev libffi-dev
+          opam init --disable-sandboxing --yes
+          eval $(opam env)
+          opam switch create ${{ env.OPAM_SWITCH }} --yes
+          opam install -y coq.${{ env.COQ_VERSION }}
+          opam install -y coq-mathcomp-ssreflect coq-mathcomp-algebra coq-stdpp
+
+      - name: "⚙️ Install security dependencies"
+        run: |
+          pip3 install --upgrade pip
+          pip3 install bandit safety numpy pandas matplotlib criterion proptest
+          sudo apt-get install -y valgrind afl
+
+      - name: "💾 Cache dependencies"
+        id: cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.opam
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-opam-${{ hashFiles('**/*.opam') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-opam-
+
+  build-project:
+    needs: setup-environment
+    runs-on: ubuntu-22.04
+    steps:
+      - name: "🔍 Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: "📂 Restore cache"
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ needs.setup-environment.outputs.cache-key }}
+
+      - name: "📦 Build dependencies"
+        run: |
+          cargo fetch --locked
+          cargo build --release --all-features
+          cargo build --release --examples
+
+      - name: "🧪 Run unit tests"
+        run: |
+          cargo test --release --all-features
+          cargo test --release --examples --all-features
+
+      - name: "📊 Generate build artifacts"
+        run: |
+          mkdir -p artifacts/bin
+          cp target/release/toruscsidh artifacts/bin/
+          cp target/release/deps/libtoruscsidh* artifacts/bin/
+          tar -czf toruscsidh-build-artifacts.tar.gz artifacts/
+
+      - name: "📤 Upload build artifacts"
+        uses: actions/upload-artifact@v3
+        with:
+          name: toruscsidh-build
+          path: toruscsidh-build-artifacts.tar.gz
+
+  formal-verification:
+    needs: build-project
+    runs-on: ubuntu-22.04
+    steps:
+      - name: "🔍 Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: "📂 Restore cache"
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.opam
+            proofs
+          key: ${{ needs.setup-environment.outputs.cache-key }}
+
+      - name: "🔧 Setup Coq environment"
+        run: |
+          eval $(opam env)
+          cd proofs
+          make clean
+
+      - name: "✅ Run formal verification"
+        run: |
+          eval $(opam env)
+          cd proofs
+          make -j $(nproc)
+          # Verify proofs with coqchk for additional security
+          coqchk -silent security/*.vo fp_arithmetic/*.vo elliptic_curves/*.vo
+
+      - name: "📊 Generate verification report"
+        run: |
+          eval $(opam env)
+          mkdir -p artifacts/verification
+          python3 scripts/generate_verification_report.py --output artifacts/verification/formal_verification.md
+
+      - name: "📤 Upload verification artifacts"
+        uses: actions/upload-artifact@v3
+        with:
+          name: formal-verification
+          path: |
+            proofs/**/*.vo
+            artifacts/verification/formal_verification.md
+
+  security-audit:
+    needs: formal-verification
+    runs-on: ubuntu-22.04
+    steps:
+      - name: "🔍 Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: "📂 Restore build artifacts"
+        uses: actions/download-artifact@v3
+        with:
+          name: toruscsidh-build
+          path: artifacts/
+
+      - name: "🔧 Setup security tools"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind afl libasan5 libubsan1
+          pip3 install --upgrade bandit safety
+
+      - name: "🧠 Run static analysis"
+        run: |
+          bandit -r src/ -f json -o artifacts/security/bandit_report.json
+          safety check -r requirements.txt > artifacts/security/safety_report.txt
+
+      - name: "🔍 Run memory safety checks"
+        run: |
+          export ASAN_OPTIONS=detect_leaks=1
+          valgrind --leak-check=full --error-exitcode=1 ./artifacts/bin/toruscsidh --run-security-tests
+
+      - name: "⚡ Run side-channel analysis"
+        run: |
+          ./artifacts/bin/toruscsidh --analyze-sidechannels --samples 100000 --output artifacts/security/sidechannel_analysis.json
+
+      - name: "🧪 Run fuzz testing"
+        run: |
+          cargo install cargo-fuzz --force
+          cargo fuzz run key_exchange_fuzzer -- -max_total_time=300
+          cargo fuzz run serialization_fuzzer -- -max_total_time=300
+
+      - name: "📊 Generate security audit report"
+        run: |
+          mkdir -p artifacts/security
+          python3 scripts/generate_security_audit_report.py \
+            --bandit bandit_report.json \
+            --valgrind valgrind_output.txt \
+            --sidechannel sidechannel_analysis.json \
+            --fuzz-results fuzz_results.txt \
+            --output artifacts/security/audit_report.md
+
+      - name: "📤 Upload security artifacts"
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-audit
+          path: |
+            artifacts/security/*.json
+            artifacts/security/*.txt
+            artifacts/security/*.md
+
+  nist-compliance:
+    needs: security-audit
+    runs-on: ubuntu-22.04
+    steps:
+      - name: "🔍 Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: "📂 Restore build artifacts"
+        uses: actions/download-artifact@v3
+        with:
+          name: toruscsidh-build
+          path: artifacts/
+
+      - name: "🧪 Run NIST Level 1 compliance tests"
+        run: |
+          ./artifacts/bin/toruscsidh --test-nist-compliance --level 1 --iterations 1000 --output artifacts/compliance/level1_results.json
+
+      - name: "🧪 Run NIST Level 3 compliance tests"
+        run: |
+          ./artifacts/bin/toruscsidh --test-nist-compliance --level 3 --iterations 1000 --output artifacts/compliance/level3_results.json
+
+      - name: "🧪 Run NIST Level 5 compliance tests"
+        run: |
+          ./artifacts/bin/toruscsidh --test-nist-compliance --level 5 --iterations 1000 --output artifacts/compliance/level5_results.json
+
+      - name: "⚖️ Compare with reference implementations"
+        run: |
+          python3 tests/nist_comparison.py \
+            --toruscsidh artifacts/bin/toruscsidh \
+            --output artifacts/compliance/comparison_report.md
+
+      - name: "📊 Generate NIST compliance report"
+        run: |
+          mkdir -p artifacts/compliance
+          python3 scripts/generate_nist_compliance_report.py \
+            --level1 level1_results.json \
+            --level3 level3_results.json \
+            --level5 level5_results.json \
+            --comparison comparison_report.md \
+            --output artifacts/compliance/nist_compliance_report.md
+
+      - name: "📤 Upload compliance artifacts"
+        uses: actions/upload-artifact@v3
+        with:
+          name: nist-compliance
+          path: |
+            artifacts/compliance/*.json
+            artifacts/compliance/*.md
+
+  generate-reports:
+    needs: [nist-compliance]
+    runs-on: ubuntu-22.04
+    outputs:
+      security_level: ${{ steps.evaluate.outputs.security_level }}
+      verification_status: ${{ steps.evaluate.outputs.verification_status }}
+    steps:
+      - name: "🔍 Checkout repository"
+        uses: actions/checkout@v4
+
+      - name: "📂 Download all artifacts"
+        uses: actions/download-artifact@v3
+        with:
+          path: artifacts/
+          pattern: '*'
+
+      - name: "📊 Generate comprehensive security report"
+        run: |
+          mkdir -p reports
+          python3 scripts/generate_comprehensive_report.py \
+            --verification artifacts/formal-verification/formal_verification.md \
+            --security artifacts/security-audit/audit_report.md \
+            --compliance artifacts/nist-compliance/nist_compliance_report.md \
+            --output reports/TorusCSIDH_Security_Report_${{ github.ref_name }}_${{ github.sha }}.md
+
+      - name: "📊 Generate technical verification report"
+        run: |
+          python3 scripts/generate_technical_report.py \
+            --proofs artifacts/formal-verification \
+            --build artifacts/toruscsidh-build \
+            --output reports/TorusCSIDH_Technical_Report_${{ github.ref_name }}_${{ github.sha }}.pdf
+
+      - name: "📊 Evaluate security level"
+        id: evaluate
+        run: |
+          security_level=$(python3 scripts/evaluate_security_level.py --report reports/TorusCSIDH_Security_Report_${{ github.ref_name }}_${{ github.sha }}.md)
+          verification_status=$(python3 scripts/evaluate_verification_status.py --proofs artifacts/formal-verification)
+          
+          echo "security_level=$security_level" >> $GITHUB_OUTPUT
+          echo "verification_status=$verification_status" >> $GITHUB_OUTPUT
+          
+          # Fail if security level is not sufficient
+          if [ "$security_level" != "MAXIMUM" ] && [ "$security_level" != "HIGH" ]; then
+            echo "❌ SECURITY LEVEL BELOW THRESHOLD: $security_level"
+            exit 1
+          fi
+          
+          # Fail if formal verification is not complete
+          if [ "$verification_status" != "VERIFIED" ]; then
+            echo "❌ FORMAL VERIFICATION INCOMPLETE: $verification_status"
+            exit 1
+          fi
+
+      - name: "📤 Upload final reports"
+        uses: actions/upload-artifact@v3
+        with:
+          name: toruscsidh-reports
+          path: |
+            reports/*.md
+            reports/*.pdf
+            reports/*.json
+
+  deployment-package:
+    needs: generate-reports
+    if: needs.generate-reports.outputs.security_level == 'MAXIMUM' && needs.generate-reports.outputs.verification_status == 'VERIFIED'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: "🔍 Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: "📂 Download build artifacts"
+        uses: actions/download-artifact@v3
+        with:
+          name: toruscsidh-build
+          path: artifacts/
+
+      - name: "📂 Download verification artifacts"
+        uses: actions/download-artifact@v3
+        with:
+          name: formal-verification
+          path: artifacts/verification/
+
+      - name: "📂 Download security reports"
+        uses: actions/download-artifact@v3
+        with:
+          name: toruscsidh-reports
+          path: reports/
+
+      - name: "📦 Create deployment package"
+        run: |
+          mkdir -p deployment-package
+          cp artifacts/bin/toruscsidh deployment-package/
+          cp -r artifacts/verification/*.vo deployment-package/proofs/
+          cp config/production.toml deployment-package/config/
+          cp scripts/health_check.sh deployment-package/scripts/
+          cp reports/TorusCSIDH_Security_Report_*.md deployment-package/docs/
+          cp reports/TorusCSIDH_Technical_Report_*.pdf deployment-package/docs/
+          
+          # Generate checksums for integrity verification
+          find deployment-package -type f -exec sha256sum {} \; > deployment-package/checksums.sha256
+          
+          # Create final tarball
+          tar -czf toruscsidh-production-maximum-security-${{ github.ref_name }}-${{ github.sha }}.tar.gz deployment-package/
+
+      - name: "📤 Upload deployment package"
+        uses: actions/upload-artifact@v3
+        with:
+          name: toruscsidh-production-package
+          path: toruscsidh-production-maximum-security-*.tar.gz
+
+      - name: "✅ Final security verification"
+        run: |
+          echo "🎉 TorusCSIDH has passed all security and verification checks!"
+          echo "🔐 Security Level: MAXIMUM"
+          echo "✅ Formal Verification Status: VERIFIED"
+          echo "📦 Deployment package is ready for production use"
+          echo ""
+          echo "Report location: reports/TorusCSIDH_Security_Report_${{ github.ref_name }}_${{ github.sha }}.md"
+          echo "Technical details: reports/TorusCSIDH_Technical_Report_${{ github.ref_name }}_${{ github.sha }}.pdf"
+
+  notify-stakeholders:
+    needs: deployment-package
+    runs-on: ubuntu-22.04
+    if: always()
+    steps:
+      - name: "📥 Download final reports"
+        uses: actions/download-artifact@v3
+        with:
+          name: toruscsidh-reports
+          path: reports/
+
+      - name: "📧 Notify security team"
+        if: needs.deployment-package.result == 'success' || needs.deployment-package.result == 'failure'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('reports/TorusCSIDH_Security_Report_${{ github.ref_name }}_${{ github.sha }}.md', 'utf8');
+            
+            const securityLevel = '${{ needs.generate-reports.outputs.security_level }}';
+            const verificationStatus = '${{ needs.generate-reports.outputs.verification_status }}';
+            const deploymentStatus = '${{ needs.deployment-package.result }}';
+            
+            let conclusion = '✅ **SECURITY AUDIT PASSED**\n\n';
+            if (deploymentStatus === 'failure') {
+              conclusion = '❌ **SECURITY AUDIT FAILED**\n\n';
+            }
+            
+            const comment = `
+            ${conclusion}
+            **Security Assessment Results:**
+            - Security Level: ${securityLevel}
+            - Formal Verification Status: ${verificationStatus}
+            - Deployment Status: ${deploymentStatus}
+            
+            **Summary:**
+            ${report.substring(0, 500)}...
+            
+            **Full report:** [Download Report](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts)
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      - name: "🚨 Critical failure alert"
+        if: needs.deployment-package.result == 'failure'
+        run: |
+          echo "🚨 CRITICAL: Security audit failed - deployment package not created"
+          echo "Security Level: ${{ needs.generate-reports.outputs.security_level }}"
+          echo "Verification Status: ${{ needs.generate-reports.outputs.verification_status }}"
+          
+          # In production, this would trigger alerts to security team
+          exit 1
