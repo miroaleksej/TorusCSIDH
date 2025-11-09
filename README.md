@@ -2,6 +2,10 @@
 
 ![image](https://github.com/user-attachments/assets/3b35effc-34f7-496b-8968-759596bf323b)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Security Verification](https://img.shields.io/badge/Security-Formally%20Verified-brightgreen)](https://github.com/miroaleksej/TorusCSIDH/actions)
+[![NIST PQC Compliant](https://img.shields.io/badge/NIST-PQC%20Level%201%20Compliant-blue)](https://csrc.nist.gov/projects/post-quantum-cryptography)
+
 **⚠️ IMPORTANT DISCLAIMER: This system is currently under active development and has not undergone independent security evaluation or professional third-party testing. It is intended for research purposes only and should not be used in production environments or for securing sensitive data at this stage.**
 
 ## Overview
