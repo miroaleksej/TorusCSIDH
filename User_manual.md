@@ -1,9 +1,5 @@
 # TorusCSIDH: Scientific Research User Manual
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Security Verification](https://img.shields.io/badge/Security-Formally%20Verified-brightgreen)](https://github.com/miroaleksej/TorusCSIDH/actions)
-[![NIST PQC Compliant](https://img.shields.io/badge/NIST-PQC%20Level%201%20Compliant-blue)](https://csrc.nist.gov/projects/post-quantum-cryptography)
-
 ## Table of Contents
 - [1. Introduction](#1-introduction)
 - [2. Mathematical Foundations](#2-mathematical-foundations)
